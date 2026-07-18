@@ -1,0 +1,163 @@
+<title>Inspire | Cashier</title>
+<link rel="icon" type="image/png" href="/static/images/logo.png">
+<link rel="stylesheet" href="/static/css/style.css">
+
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="/static/images/logo.png" alt="Inspire Workspace &amp; Cafe">
+    </div>
+    <nav class="nav">
+      <button class="nav-btn active" data-view="dashboard">
+        <span class="nav-icon">☕</span> On-Site
+      </button>
+      <button class="nav-btn" data-view="customers">
+        <span class="nav-icon">👥</span> Customers
+      </button>
+      <button class="nav-btn" data-view="subscriptions">
+        <span class="nav-icon">★</span> Subscriptions
+      </button>
+    </nav>
+    <button id="btn-new-customer" class="btn btn-primary btn-block">+ New Customer</button>
+    <div class="clock" id="clock"></div>
+  </aside>
+
+  <main class="main">
+
+    <!-- DASHBOARD -->
+    <section id="view-dashboard" class="view active">
+      <div class="view-header">
+        <h1>Currently On-Site</h1>
+        <div class="quick-checkin">
+          <input id="quick-checkin-input" type="text" placeholder="Search phone or name to check in…" autocomplete="off">
+          <div id="quick-checkin-results" class="autocomplete-results"></div>
+        </div>
+      </div>
+      <div id="checked-in-list" class="card-grid"></div>
+      <p id="checked-in-empty" class="empty-state" hidden>No one is currently checked in.</p>
+    </section>
+
+    <!-- CUSTOMERS -->
+    <section id="view-customers" class="view">
+      <div class="view-header">
+        <h1>Customers</h1>
+        <input id="customer-search" type="text" placeholder="Search phone or name…" autocomplete="off">
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Name</th><th>Phone</th><th>Status</th><th>Subscription ends</th><th>On-site</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="customers-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- SUBSCRIPTIONS -->
+    <section id="view-subscriptions" class="view">
+      <div class="view-header">
+        <h1>Eligible Subscribers</h1>
+        <p class="subtle">Customers with an active weekly or monthly pass — no hourly charge.</p>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Phone</th><th>Plan</th><th>Started</th><th>Expires</th><th>Days left</th></tr>
+        </thead>
+        <tbody id="eligible-tbody"></tbody>
+      </table>
+      <p id="eligible-empty" class="empty-state" hidden>No active subscribers right now.</p>
+    </section>
+
+  </main>
+</div>
+
+<!-- NEW CUSTOMER MODAL -->
+<div id="modal-new-customer" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>New Customer</h2>
+    <form id="form-new-customer">
+      <label>First name<input type="text" id="nc-first" required></label>
+      <label>Last name<input type="text" id="nc-last" required></label>
+      <label>Phone number<input type="tel" id="nc-phone" required placeholder="e.g. 01012345678"></label>
+      <p class="form-error" id="nc-error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn btn-primary">Create Customer</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- UPGRADE MODAL -->
+<div id="modal-upgrade" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Upgrade Subscription</h2>
+    <p id="upgrade-customer-name" class="subtle"></p>
+    <div class="plan-choice">
+      <label class="plan-card">
+        <input type="radio" name="plan" value="weekly">
+        <span class="plan-title">Weekly</span>
+        <span class="plan-sub">Valid for 7 days</span>
+      </label>
+      <label class="plan-card">
+        <input type="radio" name="plan" value="monthly">
+        <span class="plan-title">Monthly</span>
+        <span class="plan-sub">Valid for 30 days</span>
+      </label>
+    </div>
+    <label class="checkbox-row">
+      <input type="checkbox" id="upgrade-payment-confirmed">
+      I confirm payment has been received in full
+    </label>
+    <p class="form-error" id="upgrade-error" hidden></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+      <button type="button" id="btn-confirm-upgrade" class="btn btn-primary">Confirm Upgrade</button>
+    </div>
+  </div>
+</div>
+
+<!-- CHECKOUT MODAL -->
+<div id="modal-checkout" class="modal-overlay" hidden>
+  <div class="modal modal-wide">
+    <h2>Checkout — <span id="checkout-customer-name"></span></h2>
+    <div class="checkout-layout">
+      <div class="menu-panel">
+        <div class="menu-tabs" id="menu-tabs"></div>
+        <div class="menu-items" id="menu-items"></div>
+      </div>
+      <div class="cart-panel">
+        <div class="cart-time" id="cart-time-line"></div>
+        <div class="cart-items" id="cart-items"></div>
+        <div class="cart-empty" id="cart-empty">No items added.</div>
+        <div class="cart-totals">
+          <div class="cart-row"><span>Time charge</span><span id="cart-time-cost">0 LE</span></div>
+          <div class="cart-row"><span>Items</span><span id="cart-items-cost">0 LE</span></div>
+          <div class="cart-row cart-total"><span>Total</span><span id="cart-total">0 LE</span></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+          <button type="button" id="btn-confirm-checkout" class="btn btn-primary btn-block">Confirm &amp; Check Out</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- RECEIPT MODAL -->
+<div id="modal-receipt" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Receipt</h2>
+    <div id="receipt-body" class="receipt-body"></div>
+    <div id="print-status" class="print-status"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="btn-reprint">Print / Reprint</button>
+      <button type="button" class="btn btn-primary btn-block" data-close-modal>Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/js/app.js"></script>

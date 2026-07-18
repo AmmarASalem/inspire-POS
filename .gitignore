@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv (has its own nested .gitignore too, but be explicit)
+venv/
+env/
+.venv/
+
+# SQLite database (runtime data, not source)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Local secrets / env config
+.env
+.env.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
