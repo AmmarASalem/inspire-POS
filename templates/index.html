@@ -118,10 +118,10 @@
   </div>
 </div>
 
-<!-- CHECKOUT MODAL -->
+<!-- CHECKOUT / ORDER MODAL -->
 <div id="modal-checkout" class="modal-overlay" hidden>
   <div class="modal modal-wide">
-    <h2>Checkout — <span id="checkout-customer-name"></span></h2>
+    <h2><span id="checkout-modal-label">Checkout</span> — <span id="checkout-customer-name"></span></h2>
     <div class="checkout-layout">
       <div class="menu-panel">
         <div class="menu-tabs" id="menu-tabs"></div>
@@ -136,11 +136,31 @@
           <div class="cart-row"><span>Items</span><span id="cart-items-cost">0 LE</span></div>
           <div class="cart-row cart-total"><span>Total</span><span id="cart-total">0 LE</span></div>
         </div>
+        <label id="payment-method-row" class="payment-method-row">Payment method
+          <select id="checkout-payment-method">
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="wallet">Mobile wallet</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
           <button type="button" id="btn-confirm-checkout" class="btn btn-primary btn-block">Confirm &amp; Check Out</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- HISTORY MODAL -->
+<div id="modal-history" class="modal-overlay" hidden>
+  <div class="modal modal-wide">
+    <h2>Session History — <span id="history-customer-name"></span></h2>
+    <div id="history-list" class="history-list"></div>
+    <p id="history-empty" class="empty-state" hidden>No past sessions yet.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost btn-block" data-close-modal>Close</button>
     </div>
   </div>
 </div>

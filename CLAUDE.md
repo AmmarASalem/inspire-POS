@@ -20,6 +20,18 @@ Serves on `http://127.0.0.1:5000`. `app.py`'s `__main__` block calls `database.i
 
 On Fedora/externally-managed Python installs, `pip install -r requirements.txt --break-system-packages` also works if not using `venv/`.
 
+### Running it on the Windows till machine
+
+The production till machine is Windows, not Linux — the cashier is not expected to touch a terminal. `deploy/windows/` has the launcher scripts; this is a **one-time setup step outside this repo**, redone on any new till machine:
+
+1. Install Python for Windows, then from a Command Prompt in the repo folder: `py -m venv venv` and `venv\Scripts\pip install -r requirements.txt`.
+2. Auto-start on boot: press <kbd>Win+R</kbd> → `shell:startup` → Enter, then create a shortcut there pointing at `deploy\windows\start_inspire_silent.vbs` (Browse → set icon to `deploy\windows\inspire.ico`).
+3. Desktop fallback icon: create the same shortcut on the Desktop, for the cashier to click if the kiosk window is ever closed. `start_inspire.bat` is idempotent — if the server's already running it just reopens the browser.
+
+`start_inspire.bat` starts the Flask app hidden via `pythonw.exe` (bypassing `app.py`'s `__main__` debug/reloader entirely — it calls `database.init_db()` and `app.run()` directly, since Werkzeug's reloader spawning a second process is a liability for something meant to run unattended), waits for `http://127.0.0.1:5000/` to answer, then opens it full-screen in Chrome/Edge `--kiosk` mode using a dedicated profile under `deploy/windows/kiosk-profile/` (gitignored) so it doesn't collide with the cashier's normal browser profile. `start_inspire_silent.vbs` just runs that `.bat` with a hidden window so nothing flashes on screen. <kbd>Alt+F4</kbd> exits kiosk mode.
+
+**Receipt printing does not yet work on Windows** — `receipt_printer.py` shells out to the Linux/macOS-only CUPS `lp` command (see below); it needs a Windows-specific path (e.g. `python-escpos`'s `Win32Raw` printer, or a raw print via `win32print`) before checkout can print on the till machine. Until that's ported, `print_receipt()` fails closed (returns `printed: False`) rather than raising, so checkout itself still works — see `POST /api/print-receipt` for the frontend's retry path.
+
 ## Architecture
 
 **Backend** (`app.py`, single file, all routes) + **SQLite** (`database.py`, stdlib `sqlite3`, no ORM) + **vanilla JS frontend** (`templates/index.html` + `static/js/app.js`, single-page — views are `<section>`s toggled by JS, not separate routes).

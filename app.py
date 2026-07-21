@@ -1,3 +1,4 @@
+import json
 import math
 import sqlite3
 from datetime import datetime, timedelta
@@ -78,6 +79,10 @@ def customer_public(data):
         out["elapsed_seconds"] = int((datetime.now() - parse_dt(data["check_in_time"])).total_seconds())
         out["running_time_cost"] = cost if data["status"] == "not_subscribed" else 0
         out["billed_hours"] = hours
+        try:
+            out["current_order"] = json.loads(data["current_order_json"])
+        except (TypeError, ValueError):
+            out["current_order"] = []
     return out
 
 
@@ -217,7 +222,65 @@ def checkin_customer(customer_id):
         conn.close()
         return jsonify({"error": "Customer is already checked in"}), 400
 
-    conn.execute("UPDATE customers SET check_in_time=? WHERE id=?", (now_str(), customer_id))
+    conn.execute(
+        "UPDATE customers SET check_in_time=?, current_order_json='[]' WHERE id=?",
+        (now_str(), customer_id),
+    )
+    conn.commit()
+    row = _get_customer_or_404(conn, customer_id)
+    data = customer_public(sync_customer_status(conn, row))
+    conn.close()
+    return jsonify(data)
+
+
+def _resolve_order_items(conn, ordered_items):
+    """Validate [{id, qty}] against menu_items, returning (items_cost, receipt_items)."""
+    items_cost = 0
+    receipt_items = []
+    for entry in ordered_items:
+        try:
+            item_id = int(entry.get("id"))
+            qty = int(entry.get("qty", 1))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if qty <= 0:
+            continue
+        menu_row = conn.execute("SELECT * FROM menu_items WHERE id=?", (item_id,)).fetchone()
+        if not menu_row:
+            continue
+        line_total = menu_row["price"] * qty
+        items_cost += line_total
+        receipt_items.append({
+            "id": menu_row["id"],
+            "name": menu_row["name"],
+            "price": menu_row["price"],
+            "qty": qty,
+            "line_total": line_total,
+        })
+    return items_cost, receipt_items
+
+
+@app.route("/api/customers/<int:customer_id>/order", methods=["POST"])
+def save_order(customer_id):
+    """Save/update the in-progress order for an on-site customer, without checking out."""
+    body = request.get_json(force=True) or {}
+    ordered_items = body.get("items", [])  # [{id, qty}]
+
+    conn = get_db()
+    row = _get_customer_or_404(conn, customer_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+    if not row["check_in_time"]:
+        conn.close()
+        return jsonify({"error": "Customer is not checked in"}), 400
+
+    _, receipt_items = _resolve_order_items(conn, ordered_items)
+    saved = [{"id": it["id"], "qty": it["qty"]} for it in receipt_items]
+    conn.execute(
+        "UPDATE customers SET current_order_json=? WHERE id=?",
+        (json.dumps(saved), customer_id),
+    )
     conn.commit()
     row = _get_customer_or_404(conn, customer_id)
     data = customer_public(sync_customer_status(conn, row))
@@ -229,6 +292,7 @@ def checkin_customer(customer_id):
 def checkout_customer(customer_id):
     body = request.get_json(force=True) or {}
     ordered_items = body.get("items", [])  # [{id, qty}]
+    payment_method = (body.get("payment_method") or "").strip() or None
 
     conn = get_db()
     row = _get_customer_or_404(conn, customer_id)
@@ -246,39 +310,21 @@ def checkout_customer(customer_id):
     if data["status"] == "not_subscribed":
         time_cost, billed_hours = compute_time_cost(data["check_in_time"])
 
-    items_cost = 0
-    receipt_items = []
-    for entry in ordered_items:
-        try:
-            item_id = int(entry.get("id"))
-            qty = int(entry.get("qty", 1))
-        except (TypeError, ValueError):
-            continue
-        if qty <= 0:
-            continue
-        menu_row = conn.execute("SELECT * FROM menu_items WHERE id=?", (item_id,)).fetchone()
-        if not menu_row:
-            continue
-        line_total = menu_row["price"] * qty
-        items_cost += line_total
-        receipt_items.append({
-            "id": menu_row["id"],
-            "name": menu_row["name"],
-            "price": menu_row["price"],
-            "qty": qty,
-            "line_total": line_total,
-        })
+    items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
 
     total_cost = time_cost + items_cost
     check_out = now_str()
 
-    import json
     conn.execute(
-        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (customer_id, data["check_in_time"], check_out, time_cost, items_cost, total_cost, json.dumps(receipt_items)),
+        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (customer_id, data["check_in_time"], check_out, time_cost, items_cost, total_cost,
+         json.dumps(receipt_items), payment_method),
     )
-    conn.execute("UPDATE customers SET check_in_time=NULL WHERE id=?", (customer_id,))
+    conn.execute(
+        "UPDATE customers SET check_in_time=NULL, current_order_json='[]' WHERE id=?",
+        (customer_id,),
+    )
     conn.commit()
 
     receipt = {
@@ -315,6 +361,39 @@ def reprint_receipt():
         return jsonify({"error": "Invalid receipt data"}), 400
     printed, message = receipt_printer.print_receipt(receipt)
     return jsonify({"printed": printed, "message": message})
+
+
+@app.route("/api/customers/<int:customer_id>/visits", methods=["GET"])
+def customer_visits(customer_id):
+    """Session history: every past check-in/checkout for this customer, with its order."""
+    conn = get_db()
+    row = _get_customer_or_404(conn, customer_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+
+    rows = conn.execute(
+        "SELECT * FROM visits WHERE customer_id=? ORDER BY check_out DESC", (customer_id,)
+    ).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        try:
+            items = json.loads(r["items_json"])
+        except (TypeError, ValueError):
+            items = []
+        result.append({
+            "id": r["id"],
+            "check_in": r["check_in"],
+            "check_out": r["check_out"],
+            "time_cost": r["time_cost"],
+            "items_cost": r["items_cost"],
+            "total_cost": r["total_cost"],
+            "items": items,
+            "payment_method": r["payment_method"],
+        })
+    return jsonify(result)
 
 
 # ---------- Menu ----------

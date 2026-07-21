@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS customers (
                         CHECK (status IN ('not_subscribed', 'weekly', 'monthly')),
     subscription_start  TEXT,               -- ISO datetime, set when status becomes weekly/monthly
     check_in_time       TEXT,               -- ISO datetime, set while the customer is on-site
+    current_order_json  TEXT NOT NULL DEFAULT '[]',  -- in-progress order for the active on-site session
     created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -28,7 +29,8 @@ CREATE TABLE IF NOT EXISTS visits (
     time_cost     INTEGER NOT NULL DEFAULT 0,
     items_cost    INTEGER NOT NULL DEFAULT 0,
     total_cost    INTEGER NOT NULL DEFAULT 0,
-    items_json    TEXT NOT NULL DEFAULT '[]'
+    items_json    TEXT NOT NULL DEFAULT '[]',
+    payment_method TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);

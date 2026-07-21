@@ -394,6 +394,45 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 .cart-row { display: flex; justify-content: space-between; font-size: 14px; padding: 3px 0; }
 .cart-total { font-weight: 700; font-size: 17px; color: var(--green); }
 
+.payment-method-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13.5px;
+  margin-top: 10px;
+}
+.payment-method-row select { margin-left: 10px; }
+.payment-method-row[hidden] { display: none; }
+
+/* ---------- History ---------- */
+.history-list { max-height: 60vh; overflow-y: auto; margin-top: 10px; }
+.history-entry {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.history-entry .h-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.history-entry .h-items { font-size: 13.5px; margin: 6px 0; }
+.history-entry .h-items .rline { display: flex; justify-content: space-between; padding: 2px 0; }
+.history-entry .h-totals {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--green);
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.history-entry .h-payment { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
 /* ---------- Receipt ---------- */
 .receipt-body { font-size: 14px; }
 .receipt-body .rline { display: flex; justify-content: space-between; padding: 4px 0; }

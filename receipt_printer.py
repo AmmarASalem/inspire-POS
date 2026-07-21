@@ -1,17 +1,25 @@
 """Renders a checkout receipt in the Inspire brand fonts and sends it to the
-thermal receipt printer over a raw CUPS queue (see README for setup: the
-printer has no Linux driver, so it's registered as a driver-less "raw" queue
-and we send it ESC/POS bytes directly).
+thermal receipt printer.
+
+Two OS-specific backends, picked at print time by `platform.system()`:
+  - Linux/macOS: a raw CUPS queue (the printer has no driver for those OSes,
+    so CUPS is set up as a driver-less "raw" queue and we send ESC/POS bytes
+    directly via the `lp` command).
+  - Windows (the actual till machine): python-escpos's Win32Raw backend,
+    which writes ESC/POS bytes straight to the Windows print spooler via
+    pywin32 — the printer just needs to be installed as the OS's default
+    printer, no queue name to hardcode.
 
 Printing is always best-effort: a printer being off/unplugged/not configured
 must never block a checkout. print_receipt() never raises.
 """
+import platform
 import subprocess
 import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-from escpos.printer import Dummy
+from escpos.printer import Dummy, Win32Raw
 
 BASE_DIR = Path(__file__).parent
 FONT_DIR = BASE_DIR / "static" / "fonts"
@@ -22,7 +30,8 @@ ICON_BBOX = (292, 179, 554, 383)  # cup+book icon only — the source PNG also
 
 WIDTH = 576  # 80mm paper @ 203dpi
 MARGIN = 28
-PRINTER_QUEUE = "POS80"
+PRINTER_QUEUE = "POS80"  # CUPS raw queue name (Linux/macOS only)
+IS_WINDOWS = platform.system() == "Windows"
 
 STATUS_LABELS = {"not_subscribed": "Not subscribed", "weekly": "Weekly", "monthly": "Monthly"}
 
@@ -154,31 +163,58 @@ def build_receipt_image(receipt: dict) -> Image.Image:
 
 
 def print_receipt(receipt: dict) -> tuple[bool, str]:
-    """Best-effort print — builds the receipt image and sends it to the CUPS
-    'POS80' raw queue. Never raises; always returns (success, message)."""
+    """Best-effort print — builds the receipt image and sends it to the thermal
+    printer via whichever backend fits this OS. Never raises; always returns
+    (success, message)."""
     try:
         img = build_receipt_image(receipt)
-        p = Dummy()
-        p.image(img)
-        p.text("\n\n\n")
-        p.cut()
-
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(p.output)
-            tmp_path = f.name
-
-        try:
-            result = subprocess.run(
-                ["lp", "-d", PRINTER_QUEUE, "-o", "raw", tmp_path],
-                capture_output=True, text=True, timeout=15,
-            )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
-        if result.returncode != 0:
-            return False, (result.stderr or result.stdout or "Print job was rejected").strip()
-        return True, "Sent to printer"
-    except FileNotFoundError:
-        return False, "Printing is not set up on this machine (CUPS 'lp' command not found)"
+        if IS_WINDOWS:
+            return _print_windows(img)
+        return _print_cups(img)
     except Exception as e:
         return False, str(e)
+
+
+def _print_cups(img: Image.Image) -> tuple[bool, str]:
+    """Linux/macOS: render to ESC/POS bytes via a Dummy printer, then hand
+    them to the CUPS 'POS80' raw queue with `lp`."""
+    p = Dummy()
+    p.image(img)
+    p.text("\n\n\n")
+    p.cut()
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(p.output)
+        tmp_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["lp", "-d", PRINTER_QUEUE, "-o", "raw", tmp_path],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        return False, "Printing is not set up on this machine (CUPS 'lp' command not found)"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "Print job was rejected").strip()
+    return True, "Sent to printer"
+
+
+def _print_windows(img: Image.Image) -> tuple[bool, str]:
+    """Windows till machine: write ESC/POS bytes straight to the Windows print
+    spooler via pywin32, targeting whatever printer is set as the OS default
+    (the receipt printer is expected to be installed as the default printer —
+    see CLAUDE.md's Windows setup steps)."""
+    if not Win32Raw.is_usable():
+        return False, "Printing is not set up on this machine (the pywin32 package is not installed)"
+
+    printer = Win32Raw()
+    try:
+        printer.image(img)
+        printer.text("\n\n\n")
+        printer.cut()
+    finally:
+        printer.close()
+    return True, "Sent to printer"

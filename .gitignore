@@ -21,3 +21,6 @@ env/
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# Kiosk browser profile created on the till machine at runtime
+deploy/windows/kiosk-profile/

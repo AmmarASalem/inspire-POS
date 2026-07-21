@@ -5,7 +5,7 @@ const state = {
   view: "dashboard",
   menu: null,               // [{name, image, items:[{id,name,name_ar,price}]}]
   activeMenuCategory: null,
-  checkout: { customerId: null, customer: null, cart: {} }, // cart: {itemId: qty}
+  checkout: { customerId: null, customer: null, cart: {}, mode: "checkout" }, // cart: {itemId: qty}, mode: "checkout" | "order"
   lastReceipt: null,
 };
 
@@ -116,6 +116,7 @@ function renderDashboard() {
       <span class="badge badge-${c.status}">${statusLabel(c.status)}</span>
       <div class="session-timer" data-timer>0:00</div>
       <div class="session-cost" data-cost></div>
+      <button class="btn btn-ghost btn-block" data-edit-order="${c.id}">Edit Order</button>
       <button class="btn btn-primary btn-block" data-checkout="${c.id}">Checkout</button>
     `;
     grid.appendChild(card);
@@ -220,9 +221,11 @@ function renderCustomers(customers) {
       <td>${c.check_in_time ? "On-site" : "—"}</td>
       <td class="row-actions">
         ${c.check_in_time
-          ? `<button class="btn btn-ghost btn-sm" data-checkout="${c.id}">Checkout</button>`
+          ? `<button class="btn btn-ghost btn-sm" data-edit-order="${c.id}">Edit Order</button>
+             <button class="btn btn-ghost btn-sm" data-checkout="${c.id}">Checkout</button>`
           : `<button class="btn btn-ghost btn-sm" data-checkin="${c.id}">Check in</button>`}
         <button class="btn btn-ghost btn-sm" data-upgrade="${c.id}" data-name="${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}">Upgrade</button>
+        <button class="btn btn-ghost btn-sm" data-history="${c.id}" data-name="${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}">History</button>
       </td>
     `;
     tbody.appendChild(tr);
@@ -343,7 +346,7 @@ async function loadMenu() {
   return state.menu;
 }
 
-async function openCheckout(customerId) {
+async function openCheckoutModal(customerId, mode) {
   try {
     const customer = await api(`/api/customers/${customerId}`);
     if (!customer.check_in_time) {
@@ -351,15 +354,30 @@ async function openCheckout(customerId) {
       return;
     }
     await loadMenu();
-    state.checkout = { customerId, customer, cart: {} };
+    const cart = {};
+    for (const it of customer.current_order || []) cart[it.id] = it.qty;
+    state.checkout = { customerId, customer, cart, mode };
     state.activeMenuCategory = state.menu[0]?.name || null;
 
+    document.getElementById("checkout-modal-label").textContent = mode === "order" ? "Edit Order" : "Checkout";
     document.getElementById("checkout-customer-name").textContent = `${customer.first_name} ${customer.last_name}`;
+    document.getElementById("payment-method-row").hidden = mode !== "checkout";
+    document.getElementById("checkout-payment-method").value = "cash";
+    const confirmBtn = document.getElementById("btn-confirm-checkout");
+    confirmBtn.textContent = mode === "order" ? "Save Order" : "Confirm & Check Out";
     renderMenuTabs();
     renderMenuItems();
     renderCart();
     document.getElementById("modal-checkout").hidden = false;
   } catch (e) { toast(e.message, true); }
+}
+
+function openCheckout(customerId) {
+  return openCheckoutModal(customerId, "checkout");
+}
+
+function openOrderEditor(customerId) {
+  return openCheckoutModal(customerId, "order");
 }
 
 function renderMenuTabs() {
@@ -454,12 +472,24 @@ function renderCart() {
 }
 
 document.getElementById("btn-confirm-checkout").addEventListener("click", async () => {
-  const { customerId, cart } = state.checkout;
+  const { customerId, cart, mode } = state.checkout;
   const items = Object.entries(cart).map(([id, qty]) => ({ id: Number(id), qty }));
   try {
+    if (mode === "order") {
+      await api(`/api/customers/${customerId}/order`, {
+        method: "POST",
+        body: JSON.stringify({ items }),
+      });
+      document.getElementById("modal-checkout").hidden = true;
+      toast("Order saved.");
+      refreshDashboard();
+      if (state.view === "customers") refreshCustomers();
+      return;
+    }
+    const paymentMethod = document.getElementById("checkout-payment-method").value;
     const receipt = await api(`/api/customers/${customerId}/checkout`, {
       method: "POST",
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items, payment_method: paymentMethod }),
     });
     document.getElementById("modal-checkout").hidden = true;
     showReceipt(receipt);
@@ -524,6 +554,43 @@ document.getElementById("btn-reprint").addEventListener("click", async () => {
   }
 });
 
+// ---------- session history modal ----------
+
+const paymentMethodLabel = { cash: "Cash", card: "Card", wallet: "Mobile wallet", other: "Other" };
+
+async function openHistory(customerId, name) {
+  document.getElementById("history-customer-name").textContent = name || "";
+  document.getElementById("modal-history").hidden = false;
+  const list = document.getElementById("history-list");
+  list.innerHTML = "";
+  try {
+    const visits = await api(`/api/customers/${customerId}/visits`);
+    renderHistory(visits);
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderHistory(visits) {
+  const list = document.getElementById("history-list");
+  const empty = document.getElementById("history-empty");
+  list.innerHTML = "";
+  empty.hidden = visits.length !== 0;
+  for (const v of visits) {
+    const itemsHtml = v.items.length
+      ? v.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
+      : `<div class="rline"><span>No items ordered</span><span>—</span></div>`;
+    const payment = v.payment_method ? (paymentMethodLabel[v.payment_method] || v.payment_method) : "—";
+    const div = document.createElement("div");
+    div.className = "history-entry";
+    div.innerHTML = `
+      <div class="h-head"><span>Checked in ${v.check_in}</span><span>Checked out ${v.check_out}</span></div>
+      <div class="h-items">${itemsHtml}</div>
+      <div class="h-totals"><span>Total (time ${v.time_cost} LE + items ${v.items_cost} LE)</span><span>${v.total_cost} LE</span></div>
+      <div class="h-payment">Payment method: ${escapeHtml(payment)}</div>
+    `;
+    list.appendChild(div);
+  }
+}
+
 // ---------- misc ----------
 
 function escapeHtml(str) {
@@ -548,6 +615,10 @@ function setup() {
   document.body.addEventListener("click", (e) => {
     const checkoutBtn = e.target.closest("[data-checkout]");
     if (checkoutBtn) { openCheckout(Number(checkoutBtn.dataset.checkout)); return; }
+    const editOrderBtn = e.target.closest("[data-edit-order]");
+    if (editOrderBtn) { openOrderEditor(Number(editOrderBtn.dataset.editOrder)); return; }
+    const historyBtn = e.target.closest("[data-history]");
+    if (historyBtn) { openHistory(Number(historyBtn.dataset.history), historyBtn.dataset.name); return; }
     const checkinBtn = e.target.closest("[data-checkin]:not(#quick-checkin-input)");
     if (checkinBtn) {
       api(`/api/customers/${checkinBtn.dataset.checkin}/checkin`, { method: "POST" })
