@@ -15,8 +15,8 @@ let tickHandle = null;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   let data = null;
   try { data = await res.json(); } catch (e) { /* no body */ }
@@ -25,6 +25,12 @@ async function api(path, opts = {}) {
     throw new Error(msg);
   }
   return data;
+}
+
+let adminPin = sessionStorage.getItem("adminPin") || null;
+
+function adminApi(path, opts = {}) {
+  return api(path, { ...opts, headers: { ...(opts.headers || {}), "X-Admin-Pin": adminPin } });
 }
 
 function parseServerDt(s) {
@@ -54,7 +60,7 @@ function formatElapsed(seconds) {
 }
 
 function statusLabel(status) {
-  return { not_subscribed: "Not subscribed", weekly: "Weekly", monthly: "Monthly" }[status] || status;
+  return { not_subscribed: "Not subscribed", weekly: "Weekly", monthly: "Monthly", full_day: "Full Day" }[status] || status;
 }
 
 function toast(message, isError = false) {
@@ -79,6 +85,7 @@ function switchView(view) {
   if (view === "dashboard") refreshDashboard();
   if (view === "customers") refreshCustomers();
   if (view === "subscriptions") refreshSubscriptions();
+  if (view === "admin") refreshAdmin();
 }
 
 // ---------- clock ----------
@@ -261,6 +268,158 @@ function renderSubscriptions(customers) {
     `;
     tbody.appendChild(tr);
   }
+}
+
+// ---------- admin ----------
+
+async function refreshAdmin() {
+  if (!adminPin) {
+    document.getElementById("modal-admin-pin").hidden = false;
+    document.getElementById("admin-pin-input").focus();
+    return;
+  }
+  try {
+    const [menu, customers] = await Promise.all([api("/api/menu"), api("/api/customers")]);
+    state.menu = menu; // keep checkout modal in sync with any price edits made here
+    renderAdminMenu(menu);
+    renderAdminCustomers(customers);
+  } catch (e) { toast(e.message, true); }
+}
+
+function setupAdminPinModal() {
+  const modal = document.getElementById("modal-admin-pin");
+  const form = document.getElementById("form-admin-pin");
+  const errorEl = document.getElementById("admin-pin-error");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorEl.hidden = true;
+    const pin = document.getElementById("admin-pin-input").value.trim();
+    try {
+      await api("/api/admin/verify", { headers: { "X-Admin-Pin": pin } });
+      adminPin = pin;
+      sessionStorage.setItem("adminPin", pin);
+      modal.hidden = true;
+      form.reset();
+      refreshAdmin();
+    } catch (e2) {
+      errorEl.hidden = false;
+    }
+  });
+}
+
+function renderAdminMenu(menu) {
+  const container = document.getElementById("admin-menu-list");
+  container.innerHTML = "";
+  for (const cat of menu) {
+    const section = document.createElement("div");
+    section.className = "admin-menu-category";
+    const h3 = document.createElement("h3");
+    h3.textContent = cat.name;
+    section.appendChild(h3);
+    for (const item of cat.items) {
+      const row = document.createElement("div");
+      row.className = "admin-menu-row";
+      row.innerHTML = `
+        <span class="amr-name">${escapeHtml(item.name)} <span class="amr-name-ar">${escapeHtml(item.name_ar || "")}</span></span>
+        <input type="number" min="0" step="1" class="amr-price" value="${item.price}" data-id="${item.id}">
+        <span>LE</span>
+        <button class="btn btn-ghost btn-sm" data-save-price="${item.id}">Save</button>
+      `;
+      section.appendChild(row);
+    }
+    container.appendChild(section);
+  }
+  container.querySelectorAll("[data-save-price]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.savePrice);
+      const input = container.querySelector(`input[data-id="${id}"]`);
+      const price = Number(input.value);
+      if (!Number.isFinite(price) || price < 0) { toast("Invalid price.", true); return; }
+      try {
+        await adminApi(`/api/menu/${id}`, { method: "PUT", body: JSON.stringify({ price }) });
+        toast("Price updated.");
+        state.menu = null; // force a fresh fetch next time the checkout modal opens
+      } catch (e) { toast(e.message, true); }
+    });
+  });
+}
+
+let adminEditCustomerId = null;
+let adminCustomersCache = [];
+
+function renderAdminCustomers(customers) {
+  adminCustomersCache = customers;
+  const tbody = document.getElementById("admin-customers-tbody");
+  tbody.innerHTML = "";
+  for (const c of customers) {
+    const expires = c.subscription_end ? c.subscription_end : "—";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td>
+      <td>${escapeHtml(c.phone)}</td>
+      <td><span class="badge badge-${c.status}">${statusLabel(c.status)}</span></td>
+      <td>${expires}</td>
+      <td class="row-actions">
+        <button class="btn btn-ghost btn-sm" data-admin-edit="${c.id}">Edit</button>
+        <button class="btn btn-ghost btn-sm" data-admin-delete="${c.id}">Delete</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-admin-edit]").forEach((btn) =>
+    btn.addEventListener("click", () => openAdminEditCustomer(Number(btn.dataset.adminEdit)))
+  );
+  tbody.querySelectorAll("[data-admin-delete]").forEach((btn) =>
+    btn.addEventListener("click", () => deleteAdminCustomer(Number(btn.dataset.adminDelete)))
+  );
+}
+
+function openAdminEditCustomer(id) {
+  const c = adminCustomersCache.find((x) => x.id === id);
+  if (!c) return;
+  adminEditCustomerId = id;
+  document.getElementById("aec-first").value = c.first_name;
+  document.getElementById("aec-last").value = c.last_name;
+  document.getElementById("aec-phone").value = c.phone;
+  document.getElementById("aec-status").value = c.status;
+  document.getElementById("aec-error").hidden = true;
+  document.getElementById("modal-admin-edit-customer").hidden = false;
+}
+
+function setupAdminEditCustomerModal() {
+  const form = document.getElementById("form-admin-edit-customer");
+  const errorEl = document.getElementById("aec-error");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorEl.hidden = true;
+    const body = {
+      first_name: document.getElementById("aec-first").value.trim(),
+      last_name: document.getElementById("aec-last").value.trim(),
+      phone: document.getElementById("aec-phone").value.trim(),
+      status: document.getElementById("aec-status").value,
+    };
+    try {
+      await adminApi(`/api/customers/${adminEditCustomerId}`, { method: "PUT", body: JSON.stringify(body) });
+      document.getElementById("modal-admin-edit-customer").hidden = true;
+      toast("Customer updated.");
+      refreshAdmin();
+      if (state.view === "customers") refreshCustomers();
+      if (state.view === "subscriptions") refreshSubscriptions();
+    } catch (e2) {
+      errorEl.textContent = e2.message;
+      errorEl.hidden = false;
+    }
+  });
+}
+
+async function deleteAdminCustomer(id) {
+  if (!confirm("Delete this customer? This also deletes their session history. This cannot be undone.")) return;
+  try {
+    await adminApi(`/api/customers/${id}`, { method: "DELETE" });
+    toast("Customer deleted.");
+    refreshAdmin();
+    if (state.view === "customers") refreshCustomers();
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------- new customer modal ----------
@@ -556,7 +715,7 @@ document.getElementById("btn-reprint").addEventListener("click", async () => {
 
 // ---------- session history modal ----------
 
-const paymentMethodLabel = { cash: "Cash", card: "Card", wallet: "Mobile wallet", other: "Other" };
+const paymentMethodLabel = { cash: "Cash", instapay: "InstaPay", card: "Card", wallet: "Mobile wallet", other: "Other" };
 
 async function openHistory(customerId, name) {
   document.getElementById("history-customer-name").textContent = name || "";
@@ -630,6 +789,8 @@ function setup() {
   setupQuickCheckin();
   setupNewCustomerModal();
   setupUpgradeModal();
+  setupAdminPinModal();
+  setupAdminEditCustomerModal();
 
   tickClock();
   setInterval(tickClock, 1000);

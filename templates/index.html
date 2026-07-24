@@ -18,6 +18,9 @@
       <button class="nav-btn" data-view="subscriptions">
         <span class="nav-icon">★</span> Subscriptions
       </button>
+      <button class="nav-btn" id="nav-admin" data-view="admin">
+        <span class="nav-icon">⚙</span> Admin
+      </button>
     </nav>
     <button id="btn-new-customer" class="btn btn-primary btn-block">+ New Customer</button>
     <div class="clock" id="clock"></div>
@@ -69,7 +72,66 @@
       <p id="eligible-empty" class="empty-state" hidden>No active subscribers right now.</p>
     </section>
 
+    <!-- ADMIN -->
+    <section id="view-admin" class="view">
+      <div class="view-header">
+        <h1>Admin</h1>
+        <p class="subtle">Menu prices and customer management.</p>
+      </div>
+
+      <h2 class="admin-subhead">Menu Prices</h2>
+      <div id="admin-menu-list" class="admin-menu-list"></div>
+
+      <h2 class="admin-subhead">Customers</h2>
+      <table class="data-table">
+        <thead>
+          <tr><th>Name</th><th>Phone</th><th>Status</th><th>Subscription ends</th><th></th></tr>
+        </thead>
+        <tbody id="admin-customers-tbody"></tbody>
+      </table>
+    </section>
+
   </main>
+</div>
+
+<!-- ADMIN PIN MODAL -->
+<div id="modal-admin-pin" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Admin PIN</h2>
+    <form id="form-admin-pin">
+      <label>Enter PIN<input type="password" inputmode="numeric" id="admin-pin-input" required autocomplete="off"></label>
+      <p class="form-error" id="admin-pin-error" hidden>Incorrect PIN.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn btn-primary">Unlock</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ADMIN EDIT CUSTOMER MODAL -->
+<div id="modal-admin-edit-customer" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Edit Customer</h2>
+    <form id="form-admin-edit-customer">
+      <label>First name<input type="text" id="aec-first" required></label>
+      <label>Last name<input type="text" id="aec-last" required></label>
+      <label>Phone number<input type="tel" id="aec-phone" required></label>
+      <label>Status
+        <select id="aec-status">
+          <option value="not_subscribed">Not subscribed</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="full_day">Full Day</option>
+        </select>
+      </label>
+      <p class="form-error" id="aec-error" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close-modal>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Changes</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <!-- NEW CUSTOMER MODAL -->
@@ -105,6 +167,11 @@
         <span class="plan-title">Monthly</span>
         <span class="plan-sub">Valid for 30 days</span>
       </label>
+      <label class="plan-card">
+        <input type="radio" name="plan" value="full_day">
+        <span class="plan-title">Full Day</span>
+        <span class="plan-sub">100 LE — resets at 2:30am</span>
+      </label>
     </div>
     <label class="checkbox-row">
       <input type="checkbox" id="upgrade-payment-confirmed">
@@ -139,7 +206,7 @@
         <label id="payment-method-row" class="payment-method-row">Payment method
           <select id="checkout-payment-method">
             <option value="cash">Cash</option>
-            <option value="card">Card</option>
+            <option value="instapay">InstaPay</option>
             <option value="wallet">Mobile wallet</option>
             <option value="other">Other</option>
           </select>

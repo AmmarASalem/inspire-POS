@@ -1,5 +1,7 @@
+import functools
 import json
 import math
+import os
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -13,10 +15,30 @@ app = Flask(__name__)
 
 FIRST_HOUR_RATE = 30
 EXTRA_HOUR_RATE = 10
+FULL_DAY_RATE = 100
 SUBSCRIPTION_DURATIONS = {
     "weekly": timedelta(days=7),
     "monthly": timedelta(days=30),
 }
+SUBSCRIPTION_STATUSES = ("weekly", "monthly", "full_day")
+
+# Shop is open 8am-2am, so a full-day pass bought at any point during that window
+# expires at the *next* occurrence of this time, not 24h after purchase. Set a bit
+# past the official 2am close so a customer leaving a few minutes late isn't cut off.
+BUSINESS_DAY_RESET_HOUR = 2
+BUSINESS_DAY_RESET_MINUTE = 30
+
+# One-time-setup placeholder — change this before the till goes live.
+ADMIN_PIN = os.environ.get("INSPIRE_ADMIN_PIN", "1234")
+
+
+def require_admin(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if request.headers.get("X-Admin-Pin") != ADMIN_PIN:
+            return jsonify({"error": "Invalid admin PIN"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
 
 DT_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -39,26 +61,41 @@ def compute_time_cost(check_in_str, at=None):
     return FIRST_HOUR_RATE + extra_hours * EXTRA_HOUR_RATE, 1 + extra_hours
 
 
+def full_day_end(start):
+    """The next BUSINESS_DAY_RESET_HOUR:MINUTE (2:30am) at or after `start`."""
+    cutoff = start.replace(hour=BUSINESS_DAY_RESET_HOUR, minute=BUSINESS_DAY_RESET_MINUTE,
+                            second=0, microsecond=0)
+    return cutoff if start < cutoff else cutoff + timedelta(days=1)
+
+
+def compute_subscription_end(status, subscription_start):
+    """Returns the datetime a weekly/monthly/full_day pass expires, or None."""
+    if not subscription_start or status not in SUBSCRIPTION_STATUSES:
+        return None
+    start = parse_dt(subscription_start)
+    if status == "full_day":
+        return full_day_end(start)
+    return start + SUBSCRIPTION_DURATIONS[status]
+
+
 def sync_customer_status(conn, row):
-    """Lazily revert an expired weekly/monthly subscription back to not_subscribed.
+    """Lazily revert an expired weekly/monthly/full_day pass back to not_subscribed.
     Returns a plain dict for the customer, including a computed subscription_end."""
     data = dict(row)
-    if data["status"] in SUBSCRIPTION_DURATIONS and data["subscription_start"]:
-        start = parse_dt(data["subscription_start"])
-        end = start + SUBSCRIPTION_DURATIONS[data["status"]]
-        if datetime.now() >= end:
-            conn.execute(
-                "UPDATE customers SET status='not_subscribed', subscription_start=NULL WHERE id=?",
-                (data["id"],),
-            )
-            conn.commit()
-            data["status"] = "not_subscribed"
-            data["subscription_start"] = None
-            data["subscription_end"] = None
-        else:
-            data["subscription_end"] = end.strftime(DT_FMT)
-    else:
+    end = compute_subscription_end(data["status"], data["subscription_start"])
+    if end is None:
         data["subscription_end"] = None
+    elif datetime.now() >= end:
+        conn.execute(
+            "UPDATE customers SET status='not_subscribed', subscription_start=NULL WHERE id=?",
+            (data["id"],),
+        )
+        conn.commit()
+        data["status"] = "not_subscribed"
+        data["subscription_start"] = None
+        data["subscription_end"] = None
+    else:
+        data["subscription_end"] = end.strftime(DT_FMT)
     return data
 
 
@@ -89,6 +126,12 @@ def customer_public(data):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/admin/verify", methods=["GET"])
+@require_admin
+def admin_verify():
+    return jsonify({"ok": True})
 
 
 # ---------- Customers ----------
@@ -141,15 +184,15 @@ def create_customer():
 
 @app.route("/api/customers/eligible", methods=["GET"])
 def eligible_customers():
-    """Customers currently on an active weekly/monthly subscription (no hourly charge)."""
+    """Customers currently on an active weekly/monthly/full_day pass (no hourly charge)."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM customers WHERE status IN ('weekly','monthly') ORDER BY subscription_start DESC"
+        "SELECT * FROM customers WHERE status IN ('weekly','monthly','full_day') ORDER BY subscription_start DESC"
     ).fetchall()
     result = []
     for r in rows:
         data = sync_customer_status(conn, r)
-        if data["status"] in ("weekly", "monthly"):
+        if data["status"] in SUBSCRIPTION_STATUSES:
             result.append(customer_public(data))
     conn.close()
     return jsonify(result)
@@ -183,14 +226,76 @@ def get_customer(customer_id):
     return jsonify(data)
 
 
+@app.route("/api/customers/<int:customer_id>", methods=["PUT"])
+@require_admin
+def admin_update_customer(customer_id):
+    """Admin-only: edit a customer's profile and/or override their subscription status."""
+    body = request.get_json(force=True) or {}
+    conn = get_db()
+    row = _get_customer_or_404(conn, customer_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+
+    first_name = (body.get("first_name") or row["first_name"]).strip()
+    last_name = (body.get("last_name") or row["last_name"]).strip()
+    phone = (body.get("phone") or row["phone"]).strip()
+    status = body.get("status", row["status"])
+    if status not in ("not_subscribed",) + SUBSCRIPTION_STATUSES:
+        conn.close()
+        return jsonify({"error": "Invalid status"}), 400
+
+    if status == "not_subscribed":
+        subscription_start = None
+    elif status != row["status"]:
+        subscription_start = now_str()
+    else:
+        subscription_start = row["subscription_start"]
+
+    try:
+        conn.execute(
+            """UPDATE customers SET first_name=?, last_name=?, phone=?, status=?, subscription_start=?
+               WHERE id=?""",
+            (first_name, last_name, phone, status, subscription_start, customer_id),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "A customer with this phone number already exists"}), 409
+
+    row = _get_customer_or_404(conn, customer_id)
+    data = customer_public(sync_customer_status(conn, row))
+    conn.close()
+    return jsonify(data)
+
+
+@app.route("/api/customers/<int:customer_id>", methods=["DELETE"])
+@require_admin
+def admin_delete_customer(customer_id):
+    conn = get_db()
+    row = _get_customer_or_404(conn, customer_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+    if row["check_in_time"]:
+        conn.close()
+        return jsonify({"error": "Check the customer out before deleting them"}), 400
+
+    conn.execute("DELETE FROM visits WHERE customer_id=?", (customer_id,))
+    conn.execute("DELETE FROM customers WHERE id=?", (customer_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"deleted": True})
+
+
 @app.route("/api/customers/<int:customer_id>/upgrade", methods=["POST"])
 def upgrade_customer(customer_id):
     body = request.get_json(force=True) or {}
     status = body.get("status")
     payment_confirmed = bool(body.get("payment_confirmed"))
 
-    if status not in ("weekly", "monthly"):
-        return jsonify({"error": "status must be 'weekly' or 'monthly'"}), 400
+    if status not in SUBSCRIPTION_STATUSES:
+        return jsonify({"error": "status must be 'weekly', 'monthly' or 'full_day'"}), 400
     if not payment_confirmed:
         return jsonify({"error": "Payment must be confirmed before upgrading"}), 400
 
@@ -418,6 +523,40 @@ def get_menu():
             "items": grouped.get(cat, []),
         })
     return jsonify(categories)
+
+
+@app.route("/api/menu/<int:item_id>", methods=["PUT"])
+@require_admin
+def admin_update_menu_item(item_id):
+    """Admin-only: edit a menu item's price (and optionally its name)."""
+    body = request.get_json(force=True) or {}
+    conn = get_db()
+    row = conn.execute("SELECT * FROM menu_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Menu item not found"}), 404
+
+    try:
+        price = int(body.get("price", row["price"]))
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({"error": "price must be a number"}), 400
+    if price < 0:
+        conn.close()
+        return jsonify({"error": "price must not be negative"}), 400
+
+    name = (body.get("name") or row["name"]).strip()
+    name_ar = body.get("name_ar", row["name_ar"])
+
+    conn.execute(
+        "UPDATE menu_items SET price=?, name=?, name_ar=? WHERE id=?",
+        (price, name, name_ar, item_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM menu_items WHERE id=?", (item_id,)).fetchone()
+    conn.close()
+    return jsonify({"id": row["id"], "category": row["category"], "name": row["name"],
+                     "name_ar": row["name_ar"], "price": row["price"]})
 
 
 if __name__ == "__main__":

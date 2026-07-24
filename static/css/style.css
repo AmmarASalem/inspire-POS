@@ -220,6 +220,7 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 .badge-not_subscribed { background: #ece3d5; color: #7a6b52; }
 .badge-weekly { background: var(--green-pale); color: var(--green); }
 .badge-monthly { background: #f1ddc4; color: var(--brown); }
+.badge-full_day { background: #f1ddc4; color: var(--brown-light); }
 
 /* ---------- Table ---------- */
 .data-table {
@@ -244,6 +245,39 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 }
 .data-table tbody tr:hover { background: var(--cream-soft); }
 .data-table .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------- Admin ---------- */
+.admin-subhead { margin: 28px 0 12px; }
+.admin-subhead:first-of-type { margin-top: 0; }
+
+.admin-menu-list {
+  background: var(--paper);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 6px 18px;
+}
+.admin-menu-category { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.admin-menu-category:last-child { border-bottom: none; }
+.admin-menu-category h3 {
+  font-size: 15px;
+  margin: 4px 0 8px;
+}
+.admin-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.amr-name { flex: 1; font-size: 14px; }
+.amr-name-ar { color: var(--muted); font-size: 12px; margin-left: 4px; }
+.amr-price {
+  width: 80px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  text-align: right;
+}
 
 /* ---------- Modal ---------- */
 .modal-overlay {

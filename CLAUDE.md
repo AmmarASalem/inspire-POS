@@ -30,6 +30,8 @@ The production till machine is Windows, not Linux — the cashier is not expecte
 
 `start_inspire.bat` starts the Flask app hidden via `pythonw.exe` (bypassing `app.py`'s `__main__` debug/reloader entirely — it calls `database.init_db()` and `app.run()` directly, since Werkzeug's reloader spawning a second process is a liability for something meant to run unattended), waits for `http://127.0.0.1:5000/` to answer, then opens it full-screen in Chrome/Edge `--kiosk` mode using a dedicated profile under `deploy/windows/kiosk-profile/` (gitignored) so it doesn't collide with the cashier's normal browser profile. `start_inspire_silent.vbs` just runs that `.bat` with a hidden window so nothing flashes on screen. <kbd>Alt+F4</kbd> exits kiosk mode.
 
+If the server never comes up (`start_inspire.bat` times out after 20s waiting on `http://127.0.0.1:5000/`, or `start_inspire_silent.vbs` does nothing visible at all), the cause is invisible by construction: `pythonw.exe` has no console, so a startup exception (bad venv, missing dependency, a locked `inspire.db`, etc.) just vanishes instead of printing anywhere. `deploy/windows/start_inspire_debug.bat` runs the identical startup command with `python.exe` instead, in the foreground with a trailing `pause`, specifically to surface that swallowed traceback — use it once to diagnose, then go back to the normal Startup/`.vbs` setup once fixed. It's a diagnostic script, not part of the deploy path.
+
 **Receipt printing does not yet work on Windows** — `receipt_printer.py` shells out to the Linux/macOS-only CUPS `lp` command (see below); it needs a Windows-specific path (e.g. `python-escpos`'s `Win32Raw` printer, or a raw print via `win32print`) before checkout can print on the till machine. Until that's ported, `print_receipt()` fails closed (returns `printed: False`) rather than raising, so checkout itself still works — see `POST /api/print-receipt` for the frontend's retry path.
 
 ## Architecture
@@ -39,13 +41,21 @@ The production till machine is Windows, not Linux — the cashier is not expecte
 ### Billing logic (`app.py`)
 
 - Hourly customers (`status == "not_subscribed"`): `compute_time_cost()` charges a flat `FIRST_HOUR_RATE` (30 LE) for the first hour, then `EXTRA_HOUR_RATE` (10 LE) per additional *started* hour (ceil-rounded), from `check_in_time` to now.
-- Subscribers (`weekly`/`monthly`) pay no hourly charge at checkout.
-- `sync_customer_status()` is called on every customer read (list/get/checkout/etc.) and **lazily reverts** an expired subscription back to `not_subscribed` by comparing `subscription_start` + `SUBSCRIPTION_DURATIONS` (7d/30d) against now — there is no cron/background job doing this.
+- Subscribers (`weekly`/`monthly`/`full_day`, collectively `SUBSCRIPTION_STATUSES`) pay no hourly charge at checkout — anything not `not_subscribed` skips `compute_time_cost()`.
+- `full_day` is a flat `FULL_DAY_RATE` (100 LE) day-pass, charged the same way weekly/monthly are (the cashier just confirms payment in the upgrade modal; the app doesn't itself move money). It doesn't expire 24h after purchase — it expires at the *next* `BUSINESS_DAY_RESET_HOUR:BUSINESS_DAY_RESET_MINUTE` (2:30am, a bit past the shop's actual 2am close so a customer running a few minutes late isn't cut off mid-session), computed by `full_day_end()`. `compute_subscription_end()` dispatches between that and the fixed-`timedelta` weekly/monthly math (`SUBSCRIPTION_DURATIONS`, 7d/30d).
+- `sync_customer_status()` is called on every customer read (list/get/checkout/etc.) and **lazily reverts** an expired subscription (weekly/monthly/full_day) back to `not_subscribed` by comparing the computed end against now — there is no cron/background job doing this.
 - Check-in/checkout: `check_in_time` on the `customers` row marks "on-site". Checkout computes the total, inserts an audit row into `visits` (`check_in`, `check_out`, cost breakdown, `items_json`), and clears `check_in_time`.
+- `customers.status` has **no SQL CHECK constraint** — status values are validated in `app.py` only (`upgrade_customer`, `admin_update_customer`). This is deliberate: SQLite can't `ALTER` a `CHECK`, so adding `full_day` after the fact meant `database.py`'s `_migrate_drop_customers_status_check()` rebuilds the table once (copy → drop → rename) to strip the old constraint rather than requiring a fresh DB.
 
 ### Menu (`menu_data.py`)
 
-`MENU_ITEMS` is hand-transcribed (category, English name, Arabic name, price in LE) from the physical menu photos in `photos/*.webp`. `CATEGORY_IMAGES`/`CATEGORY_ORDER` map each category to the source photo that illustrates it, surfaced by `GET /api/menu` for the checkout UI's category tabs.
+`MENU_ITEMS` is hand-transcribed (category, English name, Arabic name, price in LE) from the physical menu photos. `CATEGORY_IMAGES`/`CATEGORY_ORDER` map each category to the source photo (`static/images/menu-*.webp`) that illustrates it, surfaced by `GET /api/menu` for the checkout UI's category tabs — these images are themselves cropped/converted from the menu photos and show real prices, so they need to be regenerated (not just `menu_data.py` edited) whenever prices change, or the checkout UI's illustration will contradict the actual price list below it.
+
+`database.py`'s `init_db()` only seeds `menu_items` from `MENU_ITEMS` if the table is empty — on an existing DB it instead calls `_migrate_reseed_menu()`, which wipes and reseeds *only if* a category from the current `MENU_ITEMS` (currently checks for `'Pancake'`) isn't present yet. This is a one-time-per-overhaul migration, not a sync-on-every-start: once applied, prices an admin edits via Admin mode survive future restarts instead of being clobbered back to `menu_data.py`'s values. Bumping the menu again later means picking a new "has this migration run" marker category/item the same way.
+
+### Admin mode (`app.py`, `static/js/app.js`)
+
+A single shared PIN (`ADMIN_PIN`, default `"1234"`, overridable via the `INSPIRE_ADMIN_PIN` env var) gates menu price edits and customer edit/delete — there's no per-user auth, this is a physical single-till app. The frontend prompts for the PIN once per browser session (`sessionStorage`), then sends it as an `X-Admin-Pin` header on every admin call (`adminApi()` wrapper around `api()`); the backend's `require_admin` decorator checks that header against `ADMIN_PIN` on each admin route (`GET /api/admin/verify`, `PUT /api/menu/<id>`, `PUT /api/customers/<id>`, `DELETE /api/customers/<id>`) — there's no session/token, so the PIN is effectively re-checked per request. `DELETE` refuses to remove a customer who's currently checked in, and deletes their `visits` rows first (no `ON DELETE CASCADE` in the schema). Change the default PIN before the till goes live.
 
 ### Receipt printing (`receipt_printer.py`)
 
@@ -63,3 +73,4 @@ Thermal printers here are driven as **rendered images**, not ESC/POS text comman
 Single `state` object, fetch-based calls to the JSON API, no reactive framework. Notable behavior:
 - Client-side timers mirror the server's `compute_time_cost()` formula to show a live running total on checked-in customer cards without polling every second (`setInterval` at 1s just re-renders from cached `check_in_time`; the checked-in list itself is re-fetched from the server every 15s).
 - The cream/dark-green color theme (`static/css/style.css`) was sampled programmatically from the shop's actual logo (`photos/image.png`), not picked freehand.
+- Payment method dropdown value is `instapay` (labeled "InstaPay") going forward, not `card` — `paymentMethodLabel` in `app.js` still maps the old `card` value so historical session-history entries recorded before the rename keep displaying correctly.

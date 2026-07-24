@@ -5,8 +5,9 @@ CREATE TABLE IF NOT EXISTS customers (
     phone               TEXT NOT NULL UNIQUE,
     first_name          TEXT NOT NULL,
     last_name           TEXT NOT NULL,
-    status              TEXT NOT NULL DEFAULT 'not_subscribed'
-                        CHECK (status IN ('not_subscribed', 'weekly', 'monthly')),
+    status              TEXT NOT NULL DEFAULT 'not_subscribed',
+                        -- 'not_subscribed' | 'weekly' | 'monthly' | 'full_day' (validated in app.py,
+                        -- not a CHECK, so new statuses don't need a table rebuild)
     subscription_start  TEXT,               -- ISO datetime, set when status becomes weekly/monthly
     check_in_time       TEXT,               -- ISO datetime, set while the customer is on-site
     current_order_json  TEXT NOT NULL DEFAULT '[]',  -- in-progress order for the active on-site session
