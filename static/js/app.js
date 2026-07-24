@@ -1,5 +1,12 @@
-const FIRST_HOUR_RATE = 30;
-const EXTRA_HOUR_RATE = 10;
+const BUSINESS_DAY_RESET_HOUR = 2;
+const BUSINESS_DAY_RESET_MINUTE = 30;
+
+// Used until /api/settings resolves, and as a fallback shape — actual values always
+// come from the server (admin-editable, see Admin > Rates & Pricing).
+const DEFAULT_SETTINGS = {
+  first_hour_rate: 30, extra_hour_rate: 10, daily_hourly_cap: 100,
+  weekly_price: 0, monthly_price: 0, full_day_price: 100,
+};
 
 const state = {
   view: "dashboard",
@@ -7,6 +14,7 @@ const state = {
   activeMenuCategory: null,
   checkout: { customerId: null, customer: null, cart: {}, mode: "checkout" }, // cart: {itemId: qty}, mode: "checkout" | "order"
   lastReceipt: null,
+  settings: null,
 };
 
 let tickHandle = null;
@@ -42,12 +50,36 @@ function parseServerDt(s) {
   return new Date(y, m - 1, day, hh, mm, ss);
 }
 
+function settings() {
+  return state.settings || DEFAULT_SETTINGS;
+}
+
+async function loadSettings() {
+  if (state.settings) return state.settings;
+  state.settings = await api("/api/settings");
+  return state.settings;
+}
+
+function fullDayEndClient(start) {
+  const cutoff = new Date(start.getFullYear(), start.getMonth(), start.getDate(),
+    BUSINESS_DAY_RESET_HOUR, BUSINESS_DAY_RESET_MINUTE, 0, 0);
+  return start < cutoff ? cutoff : new Date(cutoff.getTime() + 86400000);
+}
+
 function computeTimeCostClient(checkInStr, now = new Date()) {
-  const checkIn = parseServerDt(checkInStr);
-  const elapsedMinutes = (now - checkIn) / 60000;
-  if (elapsedMinutes <= 60) return FIRST_HOUR_RATE;
-  const extraHours = Math.ceil((elapsedMinutes - 60) / 60);
-  return FIRST_HOUR_RATE + extraHours * EXTRA_HOUR_RATE;
+  const { first_hour_rate, extra_hour_rate, daily_hourly_cap } = settings();
+  let total = 0;
+  let segmentStart = parseServerDt(checkInStr);
+  while (segmentStart < now) {
+    const segmentEnd = new Date(Math.min(fullDayEndClient(segmentStart).getTime(), now.getTime()));
+    const elapsedMinutes = (segmentEnd - segmentStart) / 60000;
+    const segCost = elapsedMinutes <= 60
+      ? first_hour_rate
+      : first_hour_rate + Math.ceil((elapsedMinutes - 60) / 60) * extra_hour_rate;
+    total += Math.min(segCost, daily_hourly_cap);
+    segmentStart = segmentEnd;
+  }
+  return total;
 }
 
 function formatElapsed(seconds) {
@@ -279,11 +311,46 @@ async function refreshAdmin() {
     return;
   }
   try {
-    const [menu, customers] = await Promise.all([api("/api/menu"), api("/api/customers")]);
+    const [menu, customers, rateSettings] = await Promise.all([
+      api("/api/menu"), api("/api/customers"), api("/api/settings"),
+    ]);
     state.menu = menu; // keep checkout modal in sync with any price edits made here
+    state.settings = rateSettings;
     renderAdminMenu(menu);
     renderAdminCustomers(customers);
+    renderAdminRates(rateSettings);
   } catch (e) { toast(e.message, true); }
+}
+
+function renderAdminRates(s) {
+  document.getElementById("rate-first-hour").value = s.first_hour_rate;
+  document.getElementById("rate-extra-hour").value = s.extra_hour_rate;
+  document.getElementById("rate-daily-cap").value = s.daily_hourly_cap;
+  document.getElementById("rate-weekly").value = s.weekly_price;
+  document.getElementById("rate-monthly").value = s.monthly_price;
+  document.getElementById("rate-full-day").value = s.full_day_price;
+}
+
+function setupAdminRates() {
+  document.getElementById("btn-save-rates").addEventListener("click", async () => {
+    const fields = {
+      first_hour_rate: document.getElementById("rate-first-hour").value,
+      extra_hour_rate: document.getElementById("rate-extra-hour").value,
+      daily_hourly_cap: document.getElementById("rate-daily-cap").value,
+      weekly_price: document.getElementById("rate-weekly").value,
+      monthly_price: document.getElementById("rate-monthly").value,
+      full_day_price: document.getElementById("rate-full-day").value,
+    };
+    for (const [key, val] of Object.entries(fields)) {
+      const n = Number(val);
+      if (!Number.isFinite(n) || n < 0) { toast("All rates must be non-negative numbers.", true); return; }
+      fields[key] = n;
+    }
+    try {
+      state.settings = await adminApi("/api/settings", { method: "PUT", body: JSON.stringify(fields) });
+      toast("Rates & prices updated.");
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 function setupAdminPinModal() {
@@ -464,7 +531,7 @@ function setupUpgradeModal() {
   const modal = document.getElementById("modal-upgrade");
   const errorEl = document.getElementById("upgrade-error");
 
-  document.body.addEventListener("click", (e) => {
+  document.body.addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-upgrade]");
     if (!btn) return;
     upgradeCustomerId = Number(btn.dataset.upgrade);
@@ -472,6 +539,11 @@ function setupUpgradeModal() {
     modal.querySelectorAll('input[name="plan"]').forEach((r) => (r.checked = false));
     document.getElementById("upgrade-payment-confirmed").checked = false;
     errorEl.hidden = true;
+    try { await loadSettings(); } catch (e2) { /* fall back to defaults */ }
+    const s = settings();
+    document.getElementById("plan-sub-weekly").textContent = `Valid for 7 days — ${s.weekly_price} LE`;
+    document.getElementById("plan-sub-monthly").textContent = `Valid for 30 days — ${s.monthly_price} LE`;
+    document.getElementById("plan-sub-full_day").textContent = `${s.full_day_price} LE — resets at 2:30am`;
     modal.hidden = false;
   });
 
@@ -663,11 +735,14 @@ function showReceipt(r) {
   const itemsHtml = r.items.length
     ? r.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
     : `<div class="rline"><span>No items</span><span>—</span></div>`;
+  const timeLabel = r.customer.status === "not_subscribed"
+    ? `Time charge (${r.billed_hours}h billed)`
+    : `Time charge (${statusLabel(r.customer.status)})`;
   body.innerHTML = `
     <div class="rline"><span>${escapeHtml(r.customer.first_name)} ${escapeHtml(r.customer.last_name)}</span><span>${escapeHtml(r.customer.phone)}</span></div>
     <div class="rline"><span>Status</span><span>${statusLabel(r.customer.status)}</span></div>
     <hr>
-    <div class="rline"><span>Time charge (${r.billed_hours}h billed)</span><span>${r.time_cost} LE</span></div>
+    <div class="rline"><span>${escapeHtml(timeLabel)}</span><span>${r.time_cost} LE</span></div>
     <hr>
     ${itemsHtml}
     <hr>
@@ -791,6 +866,7 @@ function setup() {
   setupUpgradeModal();
   setupAdminPinModal();
   setupAdminEditCustomerModal();
+  setupAdminRates();
 
   tickClock();
   setInterval(tickClock, 1000);
@@ -798,6 +874,7 @@ function setup() {
   setInterval(() => { if (state.view === "dashboard") refreshDashboard(); }, 15000);
   setInterval(() => { if (document.getElementById("modal-checkout").hidden === false) renderCart(); }, 1000);
 
+  loadSettings().catch(() => {});
   refreshDashboard();
 }
 

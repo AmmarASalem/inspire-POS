@@ -13,9 +13,10 @@ import receipt_printer
 
 app = Flask(__name__)
 
-FIRST_HOUR_RATE = 30
-EXTRA_HOUR_RATE = 10
-FULL_DAY_RATE = 100
+SETTINGS_FIELDS = (
+    "first_hour_rate", "extra_hour_rate", "daily_hourly_cap",
+    "weekly_price", "monthly_price", "full_day_price",
+)
 SUBSCRIPTION_DURATIONS = {
     "weekly": timedelta(days=7),
     "monthly": timedelta(days=30),
@@ -51,14 +52,36 @@ def parse_dt(s):
     return datetime.strptime(s, DT_FMT)
 
 
-def compute_time_cost(check_in_str, at=None):
-    """First hour flat FIRST_HOUR_RATE, every additional started hour EXTRA_HOUR_RATE."""
+def get_settings(conn):
+    row = conn.execute("SELECT * FROM settings WHERE id=1").fetchone()
+    return {field: row[field] for field in SETTINGS_FIELDS}
+
+
+def compute_time_cost(check_in_str, settings, at=None):
+    """First hour flat, every additional started hour at the extra rate, capped at
+    settings['daily_hourly_cap'] per business day (BUSINESS_DAY_RESET_HOUR:MINUTE to
+    the next occurrence) — a stay spanning multiple business days re-applies the cap
+    each day rather than being capped once for the whole stay."""
     at = at or datetime.now()
-    elapsed_minutes = (at - parse_dt(check_in_str)).total_seconds() / 60
-    if elapsed_minutes <= 60:
-        return FIRST_HOUR_RATE, 1
-    extra_hours = math.ceil((elapsed_minutes - 60) / 60)
-    return FIRST_HOUR_RATE + extra_hours * EXTRA_HOUR_RATE, 1 + extra_hours
+    first_hour_rate = settings["first_hour_rate"]
+    extra_hour_rate = settings["extra_hour_rate"]
+    daily_cap = settings["daily_hourly_cap"]
+
+    total_cost = 0
+    total_hours = 0
+    segment_start = parse_dt(check_in_str)
+    while segment_start < at:
+        segment_end = min(full_day_end(segment_start), at)
+        elapsed_minutes = (segment_end - segment_start).total_seconds() / 60
+        if elapsed_minutes <= 60:
+            seg_cost, seg_hours = first_hour_rate, 1
+        else:
+            extra_hours = math.ceil((elapsed_minutes - 60) / 60)
+            seg_cost, seg_hours = first_hour_rate + extra_hours * extra_hour_rate, 1 + extra_hours
+        total_cost += min(seg_cost, daily_cap)
+        total_hours += seg_hours
+        segment_start = segment_end
+    return total_cost, total_hours
 
 
 def full_day_end(start):
@@ -99,7 +122,7 @@ def sync_customer_status(conn, row):
     return data
 
 
-def customer_public(data):
+def customer_public(data, settings):
     out = {
         "id": data["id"],
         "phone": data["phone"],
@@ -112,7 +135,7 @@ def customer_public(data):
         "created_at": data["created_at"],
     }
     if data["check_in_time"]:
-        cost, hours = compute_time_cost(data["check_in_time"])
+        cost, hours = compute_time_cost(data["check_in_time"], settings)
         out["elapsed_seconds"] = int((datetime.now() - parse_dt(data["check_in_time"])).total_seconds())
         out["running_time_cost"] = cost if data["status"] == "not_subscribed" else 0
         out["billed_hours"] = hours
@@ -134,6 +157,48 @@ def admin_verify():
     return jsonify({"ok": True})
 
 
+# ---------- Settings ----------
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings_route():
+    """Public (not admin-gated) — the checkout/upgrade UI needs current rates and
+    subscription prices to display, even though only admins can change them."""
+    conn = get_db()
+    settings = get_settings(conn)
+    conn.close()
+    return jsonify(settings)
+
+
+@app.route("/api/settings", methods=["PUT"])
+@require_admin
+def admin_update_settings():
+    """Admin-only: edit the hourly rates/daily cap and subscription prices."""
+    body = request.get_json(force=True) or {}
+    conn = get_db()
+    updated = get_settings(conn)
+    for field in SETTINGS_FIELDS:
+        if field not in body:
+            continue
+        try:
+            value = int(body[field])
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({"error": f"{field} must be a number"}), 400
+        if value < 0:
+            conn.close()
+            return jsonify({"error": f"{field} must not be negative"}), 400
+        updated[field] = value
+
+    conn.execute(
+        """UPDATE settings SET first_hour_rate=?, extra_hour_rate=?, daily_hourly_cap=?,
+           weekly_price=?, monthly_price=?, full_day_price=? WHERE id=1""",
+        tuple(updated[field] for field in SETTINGS_FIELDS),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify(updated)
+
+
 # ---------- Customers ----------
 
 @app.route("/api/customers", methods=["GET"])
@@ -150,7 +215,8 @@ def list_customers():
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM customers ORDER BY created_at DESC").fetchall()
-    result = [customer_public(sync_customer_status(conn, r)) for r in rows]
+    settings = get_settings(conn)
+    result = [customer_public(sync_customer_status(conn, r), settings) for r in rows]
     conn.close()
     return jsonify(result)
 
@@ -177,7 +243,7 @@ def create_customer():
         return jsonify({"error": "A customer with this phone number already exists"}), 409
 
     row = conn.execute("SELECT * FROM customers WHERE id=?", (cur.lastrowid,)).fetchone()
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data), 201
 
@@ -189,11 +255,12 @@ def eligible_customers():
     rows = conn.execute(
         "SELECT * FROM customers WHERE status IN ('weekly','monthly','full_day') ORDER BY subscription_start DESC"
     ).fetchall()
+    settings = get_settings(conn)
     result = []
     for r in rows:
         data = sync_customer_status(conn, r)
         if data["status"] in SUBSCRIPTION_STATUSES:
-            result.append(customer_public(data))
+            result.append(customer_public(data, settings))
     conn.close()
     return jsonify(result)
 
@@ -204,7 +271,8 @@ def checked_in_customers():
     rows = conn.execute(
         "SELECT * FROM customers WHERE check_in_time IS NOT NULL ORDER BY check_in_time ASC"
     ).fetchall()
-    result = [customer_public(sync_customer_status(conn, r)) for r in rows]
+    settings = get_settings(conn)
+    result = [customer_public(sync_customer_status(conn, r), settings) for r in rows]
     conn.close()
     return jsonify(result)
 
@@ -221,7 +289,7 @@ def get_customer(customer_id):
     if not row:
         conn.close()
         return jsonify({"error": "Customer not found"}), 404
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data)
 
@@ -264,7 +332,7 @@ def admin_update_customer(customer_id):
         return jsonify({"error": "A customer with this phone number already exists"}), 409
 
     row = _get_customer_or_404(conn, customer_id)
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data)
 
@@ -311,7 +379,7 @@ def upgrade_customer(customer_id):
     )
     conn.commit()
     row = _get_customer_or_404(conn, customer_id)
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data)
 
@@ -333,7 +401,7 @@ def checkin_customer(customer_id):
     )
     conn.commit()
     row = _get_customer_or_404(conn, customer_id)
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data)
 
@@ -388,7 +456,7 @@ def save_order(customer_id):
     )
     conn.commit()
     row = _get_customer_or_404(conn, customer_id)
-    data = customer_public(sync_customer_status(conn, row))
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
     conn.close()
     return jsonify(data)
 
@@ -413,7 +481,7 @@ def checkout_customer(customer_id):
     time_cost = 0
     billed_hours = 0
     if data["status"] == "not_subscribed":
-        time_cost, billed_hours = compute_time_cost(data["check_in_time"])
+        time_cost, billed_hours = compute_time_cost(data["check_in_time"], get_settings(conn))
 
     items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
 

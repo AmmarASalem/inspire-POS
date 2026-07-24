@@ -36,3 +36,16 @@ CREATE TABLE IF NOT EXISTS visits (
 
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
 CREATE INDEX IF NOT EXISTS idx_visits_customer ON visits(customer_id);
+
+-- Single row (id=1) holding admin-editable hourly/subscription pricing, so the
+-- rates baked into app.py as defaults can be changed from the Admin page without
+-- a code change/redeploy.
+CREATE TABLE IF NOT EXISTS settings (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    first_hour_rate     INTEGER NOT NULL DEFAULT 30,
+    extra_hour_rate     INTEGER NOT NULL DEFAULT 10,
+    daily_hourly_cap    INTEGER NOT NULL DEFAULT 100,
+    weekly_price        INTEGER NOT NULL DEFAULT 0,
+    monthly_price       INTEGER NOT NULL DEFAULT 0,
+    full_day_price      INTEGER NOT NULL DEFAULT 100
+);

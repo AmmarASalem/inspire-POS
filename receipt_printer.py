@@ -33,7 +33,9 @@ MARGIN = 28
 PRINTER_QUEUE = "POS80"  # CUPS raw queue name (Linux/macOS only)
 IS_WINDOWS = platform.system() == "Windows"
 
-STATUS_LABELS = {"not_subscribed": "Not subscribed", "weekly": "Weekly", "monthly": "Monthly"}
+STATUS_LABELS = {
+    "not_subscribed": "Not subscribed", "weekly": "Weekly", "monthly": "Monthly", "full_day": "Full Day",
+}
 
 _title_font = ImageFont.truetype(str(FONT_DIR / "PlayfairDisplay-SemiBold.ttf"), 70)
 _subtitle_font = ImageFont.truetype(str(FONT_DIR / "Montserrat-Regular.ttf"), 20)
@@ -145,7 +147,12 @@ def build_receipt_image(receipt: dict) -> Image.Image:
     c.add_left_text(f"Status: {STATUS_LABELS.get(customer['status'], customer['status'])}", _small_font, pad_bottom=8)
     c.add_separator()
 
-    c.add_row(f"Time charge ({receipt['billed_hours']}h billed)", f"{receipt['time_cost']} LE")
+    status = customer["status"]
+    time_label = (
+        f"Time charge ({receipt['billed_hours']}h billed)" if status == "not_subscribed"
+        else f"Time charge ({STATUS_LABELS.get(status, status)})"
+    )
+    c.add_row(time_label, f"{receipt['time_cost']} LE")
     c.add_separator()
 
     for item in receipt["items"]:

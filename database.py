@@ -78,6 +78,7 @@ def init_db():
     _ensure_column(conn, "customers", "current_order_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "visits", "payment_method", "TEXT")
     _migrate_drop_customers_status_check(conn)
+    conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)")
 
     count = conn.execute("SELECT COUNT(*) AS n FROM menu_items").fetchone()["n"]
     if count == 0:

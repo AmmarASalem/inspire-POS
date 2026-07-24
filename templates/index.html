@@ -79,6 +79,47 @@
         <p class="subtle">Menu prices and customer management.</p>
       </div>
 
+      <h2 class="admin-subhead">Rates &amp; Subscription Prices</h2>
+      <div id="admin-rates" class="admin-menu-list">
+        <div class="admin-menu-category">
+          <h3>Hourly billing</h3>
+          <div class="admin-menu-row">
+            <span class="amr-name">First hour</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-first-hour">
+            <span>LE</span>
+          </div>
+          <div class="admin-menu-row">
+            <span class="amr-name">Each additional hour</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-extra-hour">
+            <span>LE</span>
+          </div>
+          <div class="admin-menu-row">
+            <span class="amr-name">Daily cap (then free for the rest of the day)</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-daily-cap">
+            <span>LE</span>
+          </div>
+        </div>
+        <div class="admin-menu-category">
+          <h3>Subscription prices</h3>
+          <div class="admin-menu-row">
+            <span class="amr-name">Weekly</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-weekly">
+            <span>LE</span>
+          </div>
+          <div class="admin-menu-row">
+            <span class="amr-name">Monthly</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-monthly">
+            <span>LE</span>
+          </div>
+          <div class="admin-menu-row">
+            <span class="amr-name">Full Day</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-full-day">
+            <span>LE</span>
+          </div>
+        </div>
+        <button type="button" id="btn-save-rates" class="btn btn-primary">Save Rates &amp; Prices</button>
+      </div>
+
       <h2 class="admin-subhead">Menu Prices</h2>
       <div id="admin-menu-list" class="admin-menu-list"></div>
 
@@ -160,17 +201,17 @@
       <label class="plan-card">
         <input type="radio" name="plan" value="weekly">
         <span class="plan-title">Weekly</span>
-        <span class="plan-sub">Valid for 7 days</span>
+        <span class="plan-sub" id="plan-sub-weekly">Valid for 7 days</span>
       </label>
       <label class="plan-card">
         <input type="radio" name="plan" value="monthly">
         <span class="plan-title">Monthly</span>
-        <span class="plan-sub">Valid for 30 days</span>
+        <span class="plan-sub" id="plan-sub-monthly">Valid for 30 days</span>
       </label>
       <label class="plan-card">
         <input type="radio" name="plan" value="full_day">
         <span class="plan-title">Full Day</span>
-        <span class="plan-sub">100 LE — resets at 2:30am</span>
+        <span class="plan-sub" id="plan-sub-full_day">100 LE — resets at 2:30am</span>
       </label>
     </div>
     <label class="checkbox-row">
