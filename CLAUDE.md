@@ -34,6 +34,18 @@ If the server never comes up (`start_inspire.bat` times out after 20s waiting on
 
 **Receipt printing does not yet work on Windows** — `receipt_printer.py` shells out to the Linux/macOS-only CUPS `lp` command (see below); it needs a Windows-specific path (e.g. `python-escpos`'s `Win32Raw` printer, or a raw print via `win32print`) before checkout can print on the till machine. Until that's ported, `print_receipt()` fails closed (returns `printed: False`) rather than raising, so checkout itself still works — see `POST /api/print-receipt` for the frontend's retry path.
 
+### Database backups
+
+`deploy/windows/backup_inspire_db.py` (+ `.bat` wrapper) makes a timestamped copy of `inspire.db` into `backups/` using SQLite's own backup API (safe to run while the till app is live) and prunes anything past the last 14 copies. It's meant to be triggered daily by **Windows Task Scheduler** on the till machine — a one-time OS-level setup step outside this repo, not yet done as of this writing.
+
+That alone only protects against corruption, a bad migration, or an accidental delete — `backups/` lives on the same physical disk as `inspire.db`, so a drive failure takes out both. The till has no internet connection (moving it would mean relocating it to the server room), so cloud backup isn't an option; the plan to actually survive a drive failure is:
+
+1. Dedicate a USB flash drive, left permanently plugged into the till, purely for backups.
+2. Extend the backup script to write to that USB drive as a second destination (in addition to local `backups/`), still via the daily Task Scheduler job.
+3. Periodically (whenever the till happens to go to the server room) copy that USB drive's contents to real networked/offsite storage — the only manual, infrequent step, and the actual disaster-recovery layer (fire, theft, or both drives failing together).
+
+Not yet implemented: the script currently only writes to `backups/`.
+
 ## Architecture
 
 **Backend** (`app.py`, single file, all routes) + **SQLite** (`database.py`, stdlib `sqlite3`, no ORM) + **vanilla JS frontend** (`templates/index.html` + `static/js/app.js`, single-page — views are `<section>`s toggled by JS, not separate routes).

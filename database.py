@@ -40,11 +40,12 @@ def _migrate_drop_customers_status_check(conn):
                 subscription_start  TEXT,
                 check_in_time       TEXT,
                 current_order_json  TEXT NOT NULL DEFAULT '[]',
+                is_premium          INTEGER NOT NULL DEFAULT 0,
                 created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             );
             INSERT INTO customers_new SELECT
                 id, phone, first_name, last_name, status, subscription_start,
-                check_in_time, current_order_json, created_at
+                check_in_time, current_order_json, is_premium, created_at
             FROM customers;
             DROP TABLE customers;
             ALTER TABLE customers_new RENAME TO customers;
@@ -77,6 +78,10 @@ def init_db():
 
     _ensure_column(conn, "customers", "current_order_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "visits", "payment_method", "TEXT")
+    _ensure_column(conn, "customers", "is_premium", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "visits", "is_premium", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "settings", "premium_first_hour_rate", "INTEGER NOT NULL DEFAULT 80")
+    _ensure_column(conn, "settings", "premium_extra_hour_rate", "INTEGER NOT NULL DEFAULT 50")
     _migrate_drop_customers_status_check(conn)
     conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)")
 

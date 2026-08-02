@@ -221,6 +221,7 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 .badge-weekly { background: var(--green-pale); color: var(--green); }
 .badge-monthly { background: #f1ddc4; color: var(--brown); }
 .badge-full_day { background: #f1ddc4; color: var(--brown-light); }
+.badge-premium { background: var(--green); color: var(--cream-soft); margin-left: 6px; }
 
 /* ---------- Table ---------- */
 .data-table {
@@ -278,6 +279,45 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
   font-size: 14px;
   text-align: right;
 }
+
+/* ---------- Reports ---------- */
+.report-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 0;
+}
+.report-period-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.report-period-buttons .btn.active { background: var(--green); color: var(--cream-soft); border-color: var(--green); }
+.report-custom-range { display: flex; align-items: center; gap: 8px; }
+.report-custom-range input[type="date"] {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.report-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 8px 0 20px;
+}
+.report-stat {
+  background: var(--cream-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rs-label { font-size: 12px; color: var(--muted); }
+.rs-value { font-size: 20px; font-weight: 700; color: var(--green); font-family: Georgia, serif; }
+#admin-reports h3 { font-size: 15px; margin: 18px 0 8px; }
+#admin-reports .data-table { margin-bottom: 6px; }
 
 /* ---------- Modal ---------- */
 .modal-overlay {

@@ -16,6 +16,7 @@ app = Flask(__name__)
 SETTINGS_FIELDS = (
     "first_hour_rate", "extra_hour_rate", "daily_hourly_cap",
     "weekly_price", "monthly_price", "full_day_price",
+    "premium_first_hour_rate", "premium_extra_hour_rate",
 )
 SUBSCRIPTION_DURATIONS = {
     "weekly": timedelta(days=7),
@@ -57,15 +58,12 @@ def get_settings(conn):
     return {field: row[field] for field in SETTINGS_FIELDS}
 
 
-def compute_time_cost(check_in_str, settings, at=None):
+def compute_time_cost(check_in_str, first_hour_rate, extra_hour_rate, daily_cap=None, at=None):
     """First hour flat, every additional started hour at the extra rate, capped at
-    settings['daily_hourly_cap'] per business day (BUSINESS_DAY_RESET_HOUR:MINUTE to
-    the next occurrence) — a stay spanning multiple business days re-applies the cap
-    each day rather than being capped once for the whole stay."""
+    daily_cap per business day (BUSINESS_DAY_RESET_HOUR:MINUTE to the next occurrence,
+    unless daily_cap is None) — a stay spanning multiple business days re-applies the
+    cap each day rather than being capped once for the whole stay."""
     at = at or datetime.now()
-    first_hour_rate = settings["first_hour_rate"]
-    extra_hour_rate = settings["extra_hour_rate"]
-    daily_cap = settings["daily_hourly_cap"]
 
     total_cost = 0
     total_hours = 0
@@ -78,10 +76,24 @@ def compute_time_cost(check_in_str, settings, at=None):
         else:
             extra_hours = math.ceil((elapsed_minutes - 60) / 60)
             seg_cost, seg_hours = first_hour_rate + extra_hours * extra_hour_rate, 1 + extra_hours
-        total_cost += min(seg_cost, daily_cap)
+        total_cost += seg_cost if daily_cap is None else min(seg_cost, daily_cap)
         total_hours += seg_hours
         segment_start = segment_end
     return total_cost, total_hours
+
+
+def time_cost_for(check_in_str, is_premium, settings, at=None):
+    """Picks premium (private room, uncapped, charged regardless of subscription
+    status) vs normal (hourly, capped, waived for subscribers) rates/cap."""
+    if is_premium:
+        return compute_time_cost(
+            check_in_str, settings["premium_first_hour_rate"], settings["premium_extra_hour_rate"],
+            daily_cap=None, at=at,
+        )
+    return compute_time_cost(
+        check_in_str, settings["first_hour_rate"], settings["extra_hour_rate"],
+        daily_cap=settings["daily_hourly_cap"], at=at,
+    )
 
 
 def full_day_end(start):
@@ -123,6 +135,7 @@ def sync_customer_status(conn, row):
 
 
 def customer_public(data, settings):
+    is_premium = bool(data["is_premium"])
     out = {
         "id": data["id"],
         "phone": data["phone"],
@@ -132,12 +145,14 @@ def customer_public(data, settings):
         "subscription_start": data["subscription_start"],
         "subscription_end": data.get("subscription_end"),
         "check_in_time": data["check_in_time"],
+        "is_premium": is_premium,
         "created_at": data["created_at"],
     }
     if data["check_in_time"]:
-        cost, hours = compute_time_cost(data["check_in_time"], settings)
+        chargeable = is_premium or data["status"] == "not_subscribed"
+        cost, hours = time_cost_for(data["check_in_time"], is_premium, settings) if chargeable else (0, 0)
         out["elapsed_seconds"] = int((datetime.now() - parse_dt(data["check_in_time"])).total_seconds())
-        out["running_time_cost"] = cost if data["status"] == "not_subscribed" else 0
+        out["running_time_cost"] = cost
         out["billed_hours"] = hours
         try:
             out["current_order"] = json.loads(data["current_order_json"])
@@ -191,7 +206,8 @@ def admin_update_settings():
 
     conn.execute(
         """UPDATE settings SET first_hour_rate=?, extra_hour_rate=?, daily_hourly_cap=?,
-           weekly_price=?, monthly_price=?, full_day_price=? WHERE id=1""",
+           weekly_price=?, monthly_price=?, full_day_price=?,
+           premium_first_hour_rate=?, premium_extra_hour_rate=? WHERE id=1""",
         tuple(updated[field] for field in SETTINGS_FIELDS),
     )
     conn.commit()
@@ -396,9 +412,32 @@ def checkin_customer(customer_id):
         return jsonify({"error": "Customer is already checked in"}), 400
 
     conn.execute(
-        "UPDATE customers SET check_in_time=?, current_order_json='[]' WHERE id=?",
+        "UPDATE customers SET check_in_time=?, current_order_json='[]', is_premium=0 WHERE id=?",
         (now_str(), customer_id),
     )
+    conn.commit()
+    row = _get_customer_or_404(conn, customer_id)
+    data = customer_public(sync_customer_status(conn, row), get_settings(conn))
+    conn.close()
+    return jsonify(data)
+
+
+@app.route("/api/customers/<int:customer_id>/premium", methods=["POST"])
+def set_customer_premium(customer_id):
+    """Toggle private-room billing for the customer's current on-site session."""
+    body = request.get_json(force=True) or {}
+    is_premium = bool(body.get("is_premium"))
+
+    conn = get_db()
+    row = _get_customer_or_404(conn, customer_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+    if not row["check_in_time"]:
+        conn.close()
+        return jsonify({"error": "Customer is not checked in"}), 400
+
+    conn.execute("UPDATE customers SET is_premium=? WHERE id=?", (1 if is_premium else 0, customer_id))
     conn.commit()
     row = _get_customer_or_404(conn, customer_id)
     data = customer_public(sync_customer_status(conn, row), get_settings(conn))
@@ -477,11 +516,12 @@ def checkout_customer(customer_id):
         return jsonify({"error": "Customer is not checked in"}), 400
 
     data = sync_customer_status(conn, row)
+    is_premium = bool(data["is_premium"])
 
     time_cost = 0
     billed_hours = 0
-    if data["status"] == "not_subscribed":
-        time_cost, billed_hours = compute_time_cost(data["check_in_time"], get_settings(conn))
+    if is_premium or data["status"] == "not_subscribed":
+        time_cost, billed_hours = time_cost_for(data["check_in_time"], is_premium, get_settings(conn))
 
     items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
 
@@ -489,13 +529,13 @@ def checkout_customer(customer_id):
     check_out = now_str()
 
     conn.execute(
-        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method, is_premium)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (customer_id, data["check_in_time"], check_out, time_cost, items_cost, total_cost,
-         json.dumps(receipt_items), payment_method),
+         json.dumps(receipt_items), payment_method, int(is_premium)),
     )
     conn.execute(
-        "UPDATE customers SET check_in_time=NULL, current_order_json='[]' WHERE id=?",
+        "UPDATE customers SET check_in_time=NULL, current_order_json='[]', is_premium=0 WHERE id=?",
         (customer_id,),
     )
     conn.commit()
@@ -510,6 +550,7 @@ def checkout_customer(customer_id):
         },
         "check_in": data["check_in_time"],
         "check_out": check_out,
+        "is_premium": is_premium,
         "billed_hours": billed_hours,
         "time_cost": time_cost,
         "items": receipt_items,
@@ -565,8 +606,113 @@ def customer_visits(customer_id):
             "total_cost": r["total_cost"],
             "items": items,
             "payment_method": r["payment_method"],
+            "is_premium": bool(r["is_premium"]),
         })
     return jsonify(result)
+
+
+# ---------- Reports ----------
+
+REPORT_PERIOD_DAYS = {"last_week": 7, "last_month": 30, "last_3_months": 90}
+
+
+@app.route("/api/reports", methods=["GET"])
+@require_admin
+def get_reports():
+    """Revenue reporting over a time window: totals, per-product revenue, top
+    customers. `period` is one of REPORT_PERIOD_DAYS' keys (a rolling window ending
+    now) or 'custom' with `start`/`end` query params (YYYY-MM-DD, end inclusive)."""
+    period = request.args.get("period", "last_week")
+    now = datetime.now()
+
+    if period == "custom":
+        start_str = request.args.get("start")
+        end_str = request.args.get("end")
+        if not start_str or not end_str:
+            return jsonify({"error": "start and end are required for a custom range"}), 400
+        try:
+            start = datetime.strptime(start_str, "%Y-%m-%d")
+            end = datetime.strptime(end_str, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            return jsonify({"error": "start and end must be YYYY-MM-DD"}), 400
+    elif period in REPORT_PERIOD_DAYS:
+        start = now - timedelta(days=REPORT_PERIOD_DAYS[period])
+        end = now
+    else:
+        return jsonify({"error": "Invalid period"}), 400
+
+    if start > end:
+        return jsonify({"error": "start must be before end"}), 400
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM visits WHERE check_out >= ? AND check_out < ? ORDER BY check_out",
+        (start.strftime(DT_FMT), end.strftime(DT_FMT)),
+    ).fetchall()
+
+    total_revenue = 0
+    time_revenue = 0
+    items_revenue = 0
+    premium_revenue = 0
+    products = {}       # item id -> {id, name, qty, revenue}
+    customer_totals = {}  # customer id -> {visit_count, total_spent}
+
+    for r in rows:
+        total_revenue += r["total_cost"]
+        time_revenue += r["time_cost"]
+        items_revenue += r["items_cost"]
+        if r["is_premium"]:
+            premium_revenue += r["time_cost"]
+
+        try:
+            items = json.loads(r["items_json"])
+        except (TypeError, ValueError):
+            items = []
+        for it in items:
+            entry = products.setdefault(it.get("id"), {
+                "id": it.get("id"), "name": it.get("name"), "qty": 0, "revenue": 0,
+            })
+            entry["qty"] += it.get("qty", 0)
+            entry["revenue"] += it.get("line_total", 0)
+
+        cust = customer_totals.setdefault(r["customer_id"], {"visit_count": 0, "total_spent": 0})
+        cust["visit_count"] += 1
+        cust["total_spent"] += r["total_cost"]
+
+    customer_info = {}
+    if customer_totals:
+        placeholders = ",".join("?" for _ in customer_totals)
+        for c in conn.execute(
+            f"SELECT id, first_name, last_name, phone FROM customers WHERE id IN ({placeholders})",
+            tuple(customer_totals.keys()),
+        ):
+            customer_info[c["id"]] = c
+    conn.close()
+
+    top_customers = []
+    for cid, totals in customer_totals.items():
+        info = customer_info.get(cid)
+        top_customers.append({
+            "id": cid,
+            "first_name": info["first_name"] if info else "Deleted",
+            "last_name": info["last_name"] if info else "customer",
+            "phone": info["phone"] if info else "",
+            "visit_count": totals["visit_count"],
+            "total_spent": totals["total_spent"],
+        })
+    top_customers.sort(key=lambda c: c["total_spent"], reverse=True)
+
+    return jsonify({
+        "start": start.strftime(DT_FMT),
+        "end": min(end, now).strftime(DT_FMT),
+        "visit_count": len(rows),
+        "total_revenue": total_revenue,
+        "time_revenue": time_revenue,
+        "items_revenue": items_revenue,
+        "premium_revenue": premium_revenue,
+        "products": sorted(products.values(), key=lambda p: p["revenue"], reverse=True),
+        "top_customers": top_customers[:10],
+    })
 
 
 # ---------- Menu ----------

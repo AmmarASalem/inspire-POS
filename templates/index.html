@@ -100,6 +100,19 @@
           </div>
         </div>
         <div class="admin-menu-category">
+          <h3>Private room (premium) — everyone pays, no daily cap</h3>
+          <div class="admin-menu-row">
+            <span class="amr-name">First hour</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-premium-first-hour">
+            <span>LE</span>
+          </div>
+          <div class="admin-menu-row">
+            <span class="amr-name">Each additional hour</span>
+            <input type="number" min="0" step="1" class="amr-price" id="rate-premium-extra-hour">
+            <span>LE</span>
+          </div>
+        </div>
+        <div class="admin-menu-category">
           <h3>Subscription prices</h3>
           <div class="admin-menu-row">
             <span class="amr-name">Weekly</span>
@@ -118,6 +131,38 @@
           </div>
         </div>
         <button type="button" id="btn-save-rates" class="btn btn-primary">Save Rates &amp; Prices</button>
+      </div>
+
+      <h2 class="admin-subhead">Reports</h2>
+      <div id="admin-reports" class="admin-menu-list">
+        <div class="report-controls">
+          <div class="report-period-buttons">
+            <button type="button" class="btn btn-ghost btn-sm active" data-report-period="last_week">Last Week</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-report-period="last_month">Last Month</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-report-period="last_3_months">Last 3 Months</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-report-period="custom">Custom Range</button>
+          </div>
+          <div id="report-custom-range" class="report-custom-range" hidden>
+            <input type="date" id="report-start">
+            <span>to</span>
+            <input type="date" id="report-end">
+            <button type="button" id="btn-run-custom-report" class="btn btn-primary btn-sm">Run</button>
+          </div>
+        </div>
+        <p id="report-range-label" class="subtle"></p>
+        <div id="report-summary" class="report-summary"></div>
+        <h3>Revenue by Product</h3>
+        <table class="data-table">
+          <thead><tr><th>Product</th><th>Qty sold</th><th>Revenue</th></tr></thead>
+          <tbody id="report-products-tbody"></tbody>
+        </table>
+        <p id="report-products-empty" class="empty-state" hidden>No sales in this period.</p>
+        <h3>Top Customers</h3>
+        <table class="data-table">
+          <thead><tr><th>Name</th><th>Phone</th><th>Visits</th><th>Total spent</th></tr></thead>
+          <tbody id="report-customers-tbody"></tbody>
+        </table>
+        <p id="report-customers-empty" class="empty-state" hidden>No visits in this period.</p>
       </div>
 
       <h2 class="admin-subhead">Menu Prices</h2>
@@ -236,6 +281,10 @@
         <div class="menu-items" id="menu-items"></div>
       </div>
       <div class="cart-panel">
+        <label class="checkbox-row" id="checkout-premium-row">
+          <input type="checkbox" id="checkout-premium-toggle">
+          Private room (premium hourly rate)
+        </label>
         <div class="cart-time" id="cart-time-line"></div>
         <div class="cart-items" id="cart-items"></div>
         <div class="cart-empty" id="cart-empty">No items added.</div>

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS customers (
     subscription_start  TEXT,               -- ISO datetime, set when status becomes weekly/monthly
     check_in_time       TEXT,               -- ISO datetime, set while the customer is on-site
     current_order_json  TEXT NOT NULL DEFAULT '[]',  -- in-progress order for the active on-site session
+    is_premium          INTEGER NOT NULL DEFAULT 0,  -- private-room seating for the current on-site session
     created_at          TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS visits (
     items_cost    INTEGER NOT NULL DEFAULT 0,
     total_cost    INTEGER NOT NULL DEFAULT 0,
     items_json    TEXT NOT NULL DEFAULT '[]',
-    payment_method TEXT
+    payment_method TEXT,
+    is_premium    INTEGER NOT NULL DEFAULT 0  -- whether this session billed at the private-room rate
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
@@ -47,5 +49,7 @@ CREATE TABLE IF NOT EXISTS settings (
     daily_hourly_cap    INTEGER NOT NULL DEFAULT 100,
     weekly_price        INTEGER NOT NULL DEFAULT 0,
     monthly_price       INTEGER NOT NULL DEFAULT 0,
-    full_day_price      INTEGER NOT NULL DEFAULT 100
+    full_day_price      INTEGER NOT NULL DEFAULT 100,
+    premium_first_hour_rate INTEGER NOT NULL DEFAULT 80,  -- private-room rate: everyone pays this,
+    premium_extra_hour_rate INTEGER NOT NULL DEFAULT 50   -- including subscribers, uncapped
 );

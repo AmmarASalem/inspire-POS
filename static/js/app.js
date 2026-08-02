@@ -6,6 +6,7 @@ const BUSINESS_DAY_RESET_MINUTE = 30;
 const DEFAULT_SETTINGS = {
   first_hour_rate: 30, extra_hour_rate: 10, daily_hourly_cap: 100,
   weekly_price: 0, monthly_price: 0, full_day_price: 100,
+  premium_first_hour_rate: 80, premium_extra_hour_rate: 50,
 };
 
 const state = {
@@ -66,17 +67,20 @@ function fullDayEndClient(start) {
   return start < cutoff ? cutoff : new Date(cutoff.getTime() + 86400000);
 }
 
-function computeTimeCostClient(checkInStr, now = new Date()) {
-  const { first_hour_rate, extra_hour_rate, daily_hourly_cap } = settings();
+function computeTimeCostClient(checkInStr, isPremium, now = new Date()) {
+  const s = settings();
+  const firstRate = isPremium ? s.premium_first_hour_rate : s.first_hour_rate;
+  const extraRate = isPremium ? s.premium_extra_hour_rate : s.extra_hour_rate;
+  const cap = isPremium ? null : s.daily_hourly_cap; // private room is uncapped
   let total = 0;
   let segmentStart = parseServerDt(checkInStr);
   while (segmentStart < now) {
     const segmentEnd = new Date(Math.min(fullDayEndClient(segmentStart).getTime(), now.getTime()));
     const elapsedMinutes = (segmentEnd - segmentStart) / 60000;
     const segCost = elapsedMinutes <= 60
-      ? first_hour_rate
-      : first_hour_rate + Math.ceil((elapsedMinutes - 60) / 60) * extra_hour_rate;
-    total += Math.min(segCost, daily_hourly_cap);
+      ? firstRate
+      : firstRate + Math.ceil((elapsedMinutes - 60) / 60) * extraRate;
+    total += cap == null ? segCost : Math.min(segCost, cap);
     segmentStart = segmentEnd;
   }
   return total;
@@ -149,12 +153,15 @@ function renderDashboard() {
     card.className = "session-card";
     card.dataset.checkin = c.check_in_time;
     card.dataset.status = c.status;
+    card.dataset.premium = c.is_premium ? "1" : "0";
     card.innerHTML = `
       <div class="name">${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</div>
       <div class="phone">${escapeHtml(c.phone)}</div>
       <span class="badge badge-${c.status}">${statusLabel(c.status)}</span>
+      ${c.is_premium ? `<span class="badge badge-premium">🔒 Private Room</span>` : ""}
       <div class="session-timer" data-timer>0:00</div>
       <div class="session-cost" data-cost></div>
+      <button class="btn btn-ghost btn-block" data-toggle-premium="${c.id}">${c.is_premium ? "Move to Normal Seating" : "Move to Private Room"}</button>
       <button class="btn btn-ghost btn-block" data-edit-order="${c.id}">Edit Order</button>
       <button class="btn btn-primary btn-block" data-checkout="${c.id}">Checkout</button>
     `;
@@ -170,8 +177,9 @@ function tickTimers() {
     const elapsed = (now - checkIn) / 1000;
     card.querySelector("[data-timer]").textContent = formatElapsed(elapsed);
     const costEl = card.querySelector("[data-cost]");
-    if (card.dataset.status === "not_subscribed") {
-      costEl.textContent = `${computeTimeCostClient(card.dataset.checkin, now)} LE so far`;
+    const isPremium = card.dataset.premium === "1";
+    if (isPremium || card.dataset.status === "not_subscribed") {
+      costEl.textContent = `${computeTimeCostClient(card.dataset.checkin, isPremium, now)} LE so far`;
     } else {
       costEl.textContent = "No hourly charge (subscribed)";
     }
@@ -257,7 +265,7 @@ function renderCustomers(customers) {
       <td>${escapeHtml(c.phone)}</td>
       <td><span class="badge badge-${c.status}">${statusLabel(c.status)}</span></td>
       <td>${expires}</td>
-      <td>${c.check_in_time ? "On-site" : "—"}</td>
+      <td>${c.check_in_time ? (c.is_premium ? "On-site 🔒" : "On-site") : "—"}</td>
       <td class="row-actions">
         ${c.check_in_time
           ? `<button class="btn btn-ghost btn-sm" data-edit-order="${c.id}">Edit Order</button>
@@ -319,6 +327,7 @@ async function refreshAdmin() {
     renderAdminMenu(menu);
     renderAdminCustomers(customers);
     renderAdminRates(rateSettings);
+    if (activeReportRange.period !== "custom") loadReport();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -326,6 +335,8 @@ function renderAdminRates(s) {
   document.getElementById("rate-first-hour").value = s.first_hour_rate;
   document.getElementById("rate-extra-hour").value = s.extra_hour_rate;
   document.getElementById("rate-daily-cap").value = s.daily_hourly_cap;
+  document.getElementById("rate-premium-first-hour").value = s.premium_first_hour_rate;
+  document.getElementById("rate-premium-extra-hour").value = s.premium_extra_hour_rate;
   document.getElementById("rate-weekly").value = s.weekly_price;
   document.getElementById("rate-monthly").value = s.monthly_price;
   document.getElementById("rate-full-day").value = s.full_day_price;
@@ -337,6 +348,8 @@ function setupAdminRates() {
       first_hour_rate: document.getElementById("rate-first-hour").value,
       extra_hour_rate: document.getElementById("rate-extra-hour").value,
       daily_hourly_cap: document.getElementById("rate-daily-cap").value,
+      premium_first_hour_rate: document.getElementById("rate-premium-first-hour").value,
+      premium_extra_hour_rate: document.getElementById("rate-premium-extra-hour").value,
       weekly_price: document.getElementById("rate-weekly").value,
       monthly_price: document.getElementById("rate-monthly").value,
       full_day_price: document.getElementById("rate-full-day").value,
@@ -372,6 +385,73 @@ function setupAdminPinModal() {
       errorEl.hidden = false;
     }
   });
+}
+
+// ---------- admin reports ----------
+
+let activeReportRange = { period: "last_week", start: null, end: null };
+
+function setupAdminReports() {
+  document.querySelectorAll("[data-report-period]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const period = btn.dataset.reportPeriod;
+      document.querySelectorAll("[data-report-period]").forEach((b) => b.classList.toggle("active", b === btn));
+      document.getElementById("report-custom-range").hidden = period !== "custom";
+      if (period !== "custom") {
+        activeReportRange = { period, start: null, end: null };
+        loadReport();
+      }
+    });
+  });
+  document.getElementById("btn-run-custom-report").addEventListener("click", () => {
+    const start = document.getElementById("report-start").value;
+    const end = document.getElementById("report-end").value;
+    if (!start || !end) { toast("Choose both a start and end date.", true); return; }
+    activeReportRange = { period: "custom", start, end };
+    loadReport();
+  });
+}
+
+async function loadReport() {
+  const { period, start, end } = activeReportRange;
+  let url = `/api/reports?period=${period}`;
+  if (period === "custom") url += `&start=${start}&end=${end}`;
+  try {
+    const report = await adminApi(url);
+    renderReport(report);
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderReport(r) {
+  document.getElementById("report-range-label").textContent =
+    `${r.start} → ${r.end} · ${r.visit_count} visit${r.visit_count === 1 ? "" : "s"}`;
+
+  document.getElementById("report-summary").innerHTML = `
+    <div class="report-stat"><span class="rs-label">Total revenue</span><span class="rs-value">${r.total_revenue} LE</span></div>
+    <div class="report-stat"><span class="rs-label">Time charges</span><span class="rs-value">${r.time_revenue} LE</span></div>
+    <div class="report-stat"><span class="rs-label">Items</span><span class="rs-value">${r.items_revenue} LE</span></div>
+    <div class="report-stat"><span class="rs-label">Private room</span><span class="rs-value">${r.premium_revenue} LE</span></div>
+  `;
+
+  const ptbody = document.getElementById("report-products-tbody");
+  const pempty = document.getElementById("report-products-empty");
+  ptbody.innerHTML = "";
+  pempty.hidden = r.products.length !== 0;
+  for (const p of r.products) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(p.name || "—")}</td><td>${p.qty}</td><td>${p.revenue} LE</td>`;
+    ptbody.appendChild(tr);
+  }
+
+  const ctbody = document.getElementById("report-customers-tbody");
+  const cempty = document.getElementById("report-customers-empty");
+  ctbody.innerHTML = "";
+  cempty.hidden = r.top_customers.length !== 0;
+  for (const c of r.top_customers) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td><td>${escapeHtml(c.phone)}</td><td>${c.visit_count}</td><td>${c.total_spent} LE</td>`;
+    ctbody.appendChild(tr);
+  }
 }
 
 function renderAdminMenu(menu) {
@@ -594,6 +674,7 @@ async function openCheckoutModal(customerId, mode) {
     document.getElementById("checkout-customer-name").textContent = `${customer.first_name} ${customer.last_name}`;
     document.getElementById("payment-method-row").hidden = mode !== "checkout";
     document.getElementById("checkout-payment-method").value = "cash";
+    document.getElementById("checkout-premium-toggle").checked = !!customer.is_premium;
     const confirmBtn = document.getElementById("btn-confirm-checkout");
     confirmBtn.textContent = mode === "order" ? "Save Order" : "Confirm & Check Out";
     renderMenuTabs();
@@ -656,6 +737,20 @@ function renderMenuItems() {
   );
 }
 
+document.getElementById("checkout-premium-toggle").addEventListener("change", async (e) => {
+  const checked = e.target.checked;
+  try {
+    const updated = await api(`/api/customers/${state.checkout.customerId}/premium`, {
+      method: "POST", body: JSON.stringify({ is_premium: checked }),
+    });
+    state.checkout.customer = updated;
+    renderCart();
+  } catch (err) {
+    e.target.checked = !checked;
+    toast(err.message, true);
+  }
+});
+
 function findMenuItemById(id) {
   for (const cat of state.menu) {
     const found = cat.items.find((i) => i.id === id);
@@ -693,10 +788,14 @@ function renderCart() {
     itemsEl.appendChild(row);
   }
 
-  const timeCost = customer.status === "not_subscribed" ? computeTimeCostClient(customer.check_in_time) : 0;
-  document.getElementById("cart-time-line").textContent = customer.status === "not_subscribed"
-    ? `Checked in at ${customer.check_in_time.split(" ")[1]} — billed hourly`
-    : `${statusLabel(customer.status)} subscriber — no hourly charge`;
+  const isPremium = !!customer.is_premium;
+  const chargeable = isPremium || customer.status === "not_subscribed";
+  const timeCost = chargeable ? computeTimeCostClient(customer.check_in_time, isPremium) : 0;
+  document.getElementById("cart-time-line").textContent = isPremium
+    ? `Private room since ${customer.check_in_time.split(" ")[1]} — billed hourly (premium rate)`
+    : chargeable
+      ? `Checked in at ${customer.check_in_time.split(" ")[1]} — billed hourly`
+      : `${statusLabel(customer.status)} subscriber — no hourly charge`;
   document.getElementById("cart-time-cost").textContent = `${timeCost} LE`;
   document.getElementById("cart-items-cost").textContent = `${itemsCost} LE`;
   document.getElementById("cart-total").textContent = `${timeCost + itemsCost} LE`;
@@ -735,9 +834,11 @@ function showReceipt(r) {
   const itemsHtml = r.items.length
     ? r.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
     : `<div class="rline"><span>No items</span><span>—</span></div>`;
-  const timeLabel = r.customer.status === "not_subscribed"
-    ? `Time charge (${r.billed_hours}h billed)`
-    : `Time charge (${statusLabel(r.customer.status)})`;
+  const timeLabel = r.is_premium
+    ? `Private room time charge (${r.billed_hours}h billed)`
+    : r.customer.status === "not_subscribed"
+      ? `Time charge (${r.billed_hours}h billed)`
+      : `Time charge (${statusLabel(r.customer.status)})`;
   body.innerHTML = `
     <div class="rline"><span>${escapeHtml(r.customer.first_name)} ${escapeHtml(r.customer.last_name)}</span><span>${escapeHtml(r.customer.phone)}</span></div>
     <div class="rline"><span>Status</span><span>${statusLabel(r.customer.status)}</span></div>
@@ -818,7 +919,7 @@ function renderHistory(visits) {
     div.innerHTML = `
       <div class="h-head"><span>Checked in ${v.check_in}</span><span>Checked out ${v.check_out}</span></div>
       <div class="h-items">${itemsHtml}</div>
-      <div class="h-totals"><span>Total (time ${v.time_cost} LE + items ${v.items_cost} LE)</span><span>${v.total_cost} LE</span></div>
+      <div class="h-totals"><span>Total (time ${v.time_cost} LE${v.is_premium ? " · private room" : ""} + items ${v.items_cost} LE)</span><span>${v.total_cost} LE</span></div>
       <div class="h-payment">Payment method: ${escapeHtml(payment)}</div>
     `;
     list.appendChild(div);
@@ -853,6 +954,16 @@ function setup() {
     if (editOrderBtn) { openOrderEditor(Number(editOrderBtn.dataset.editOrder)); return; }
     const historyBtn = e.target.closest("[data-history]");
     if (historyBtn) { openHistory(Number(historyBtn.dataset.history), historyBtn.dataset.name); return; }
+    const premiumBtn = e.target.closest("[data-toggle-premium]");
+    if (premiumBtn) {
+      const id = Number(premiumBtn.dataset.togglePremium);
+      const current = checkedInCache.find((c) => c.id === id);
+      const next = !(current && current.is_premium);
+      api(`/api/customers/${id}/premium`, { method: "POST", body: JSON.stringify({ is_premium: next }) })
+        .then(() => { toast(next ? "Moved to private room." : "Moved to normal seating."); refreshDashboard(); })
+        .catch((err) => toast(err.message, true));
+      return;
+    }
     const checkinBtn = e.target.closest("[data-checkin]:not(#quick-checkin-input)");
     if (checkinBtn) {
       api(`/api/customers/${checkinBtn.dataset.checkin}/checkin`, { method: "POST" })
@@ -867,6 +978,7 @@ function setup() {
   setupAdminPinModal();
   setupAdminEditCustomerModal();
   setupAdminRates();
+  setupAdminReports();
 
   tickClock();
   setInterval(tickClock, 1000);
