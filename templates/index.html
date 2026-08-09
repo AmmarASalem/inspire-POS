@@ -23,6 +23,7 @@
       </button>
     </nav>
     <button id="btn-new-customer" class="btn btn-primary btn-block">+ New Customer</button>
+    <button id="btn-takeaway" class="btn btn-ghost btn-block">🥤 Takeaway Order</button>
     <div class="clock" id="clock"></div>
   </aside>
 
@@ -137,6 +138,7 @@
       <div id="admin-reports" class="admin-menu-list">
         <div class="report-controls">
           <div class="report-period-buttons">
+            <button type="button" class="btn btn-ghost btn-sm" data-report-period="today">Today</button>
             <button type="button" class="btn btn-ghost btn-sm active" data-report-period="last_week">Last Week</button>
             <button type="button" class="btn btn-ghost btn-sm" data-report-period="last_month">Last Month</button>
             <button type="button" class="btn btn-ghost btn-sm" data-report-period="last_3_months">Last 3 Months</button>
@@ -159,7 +161,7 @@
         <p id="report-products-empty" class="empty-state" hidden>No sales in this period.</p>
         <h3>Top Customers</h3>
         <table class="data-table">
-          <thead><tr><th>Name</th><th>Phone</th><th>Visits</th><th>Total spent</th></tr></thead>
+          <thead><tr><th>Name</th><th>Phone</th><th>Time spent</th><th>Total spent</th></tr></thead>
           <tbody id="report-customers-tbody"></tbody>
         </table>
         <p id="report-customers-empty" class="empty-state" hidden>No visits in this period.</p>
@@ -289,7 +291,7 @@
         <div class="cart-items" id="cart-items"></div>
         <div class="cart-empty" id="cart-empty">No items added.</div>
         <div class="cart-totals">
-          <div class="cart-row"><span>Time charge</span><span id="cart-time-cost">0 LE</span></div>
+          <div class="cart-row" id="cart-time-row"><span>Time charge</span><span id="cart-time-cost">0 LE</span></div>
           <div class="cart-row"><span>Items</span><span id="cart-items-cost">0 LE</span></div>
           <div class="cart-row cart-total"><span>Total</span><span id="cart-total">0 LE</span></div>
         </div>

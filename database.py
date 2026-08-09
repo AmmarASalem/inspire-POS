@@ -55,6 +55,40 @@ def _migrate_drop_customers_status_check(conn):
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_visits_customer_id_nullable(conn):
+    """Takeaway orders are recorded as visits with no customer, so
+    visits.customer_id has to be nullable. SQLite can't ALTER a NOT NULL away, so
+    rebuild the table once — only runs on DBs created before takeaway existed, and
+    every visits row is copied across."""
+    info = {row["name"]: row for row in conn.execute("PRAGMA table_info(visits)")}
+    if not info.get("customer_id") or not info["customer_id"]["notnull"]:
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.executescript("""
+        CREATE TABLE visits_new (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id   INTEGER REFERENCES customers(id),
+            check_in      TEXT NOT NULL,
+            check_out     TEXT NOT NULL,
+            time_cost     INTEGER NOT NULL DEFAULT 0,
+            items_cost    INTEGER NOT NULL DEFAULT 0,
+            total_cost    INTEGER NOT NULL DEFAULT 0,
+            items_json    TEXT NOT NULL DEFAULT '[]',
+            payment_method TEXT,
+            is_premium    INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO visits_new SELECT
+            id, customer_id, check_in, check_out, time_cost, items_cost,
+            total_cost, items_json, payment_method, is_premium
+        FROM visits;
+        DROP TABLE visits;
+        ALTER TABLE visits_new RENAME TO visits;
+        CREATE INDEX IF NOT EXISTS idx_visits_customer ON visits(customer_id);
+    """)
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _migrate_reseed_menu(conn):
     """One-time reseed to the 2026-07 menu overhaul (new prices, new Pancake category).
     Only runs if the new menu hasn't been applied yet, so it never clobbers prices an
@@ -83,6 +117,9 @@ def init_db():
     _ensure_column(conn, "settings", "premium_first_hour_rate", "INTEGER NOT NULL DEFAULT 80")
     _ensure_column(conn, "settings", "premium_extra_hour_rate", "INTEGER NOT NULL DEFAULT 50")
     _migrate_drop_customers_status_check(conn)
+    # after the _ensure_column calls above: this rebuild copies visits column-by-column,
+    # so payment_method/is_premium have to exist by the time it runs
+    _migrate_visits_customer_id_nullable(conn)
     conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)")
 
     count = conn.execute("SELECT COUNT(*) AS n FROM menu_items").fetchone()["n"]

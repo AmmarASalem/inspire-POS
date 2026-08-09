@@ -25,9 +25,11 @@ CREATE TABLE IF NOT EXISTS menu_items (
 
 CREATE TABLE IF NOT EXISTS visits (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer_id   INTEGER NOT NULL REFERENCES customers(id),
+    customer_id   INTEGER REFERENCES customers(id),
+                  -- NULL for a takeaway order: a walk-in buying food/drink to go,
+                  -- with no customer record, no workspace stay and no hourly charge
     check_in      TEXT NOT NULL,
-    check_out     TEXT NOT NULL,
+    check_out     TEXT NOT NULL,   -- equal to check_in for a takeaway order
     time_cost     INTEGER NOT NULL DEFAULT 0,
     items_cost    INTEGER NOT NULL DEFAULT 0,
     total_cost    INTEGER NOT NULL DEFAULT 0,

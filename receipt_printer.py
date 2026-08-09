@@ -141,19 +141,25 @@ def build_receipt_image(receipt: dict) -> Image.Image:
     c.add_centered_text("WORKSPACE & CAFE", _subtitle_font, tracking=6, pad_top=0, pad_bottom=10)
     c.add_separator()
 
-    customer = receipt["customer"]
-    c.add_left_text(f"{customer['first_name']} {customer['last_name']}", _body_font)
-    c.add_left_text(customer["phone"], _small_font)
-    c.add_left_text(f"Status: {STATUS_LABELS.get(customer['status'], customer['status'])}", _small_font, pad_bottom=8)
-    c.add_separator()
+    if receipt.get("takeaway"):
+        # Takeaway order: no customer and no time charge, so both blocks are skipped
+        # entirely rather than printed with empty/zero values.
+        c.add_left_text("TAKEAWAY ORDER", _body_font, pad_bottom=8)
+        c.add_separator()
+    else:
+        customer = receipt["customer"]
+        c.add_left_text(f"{customer['first_name']} {customer['last_name']}", _body_font)
+        c.add_left_text(customer["phone"], _small_font)
+        c.add_left_text(f"Status: {STATUS_LABELS.get(customer['status'], customer['status'])}", _small_font, pad_bottom=8)
+        c.add_separator()
 
-    status = customer["status"]
-    time_label = (
-        f"Time charge ({receipt['billed_hours']}h billed)" if status == "not_subscribed"
-        else f"Time charge ({STATUS_LABELS.get(status, status)})"
-    )
-    c.add_row(time_label, f"{receipt['time_cost']} LE")
-    c.add_separator()
+        status = customer["status"]
+        time_label = (
+            f"Time charge ({receipt['billed_hours']}h billed)" if status == "not_subscribed"
+            else f"Time charge ({STATUS_LABELS.get(status, status)})"
+        )
+        c.add_row(time_label, f"{receipt['time_cost']} LE")
+        c.add_separator()
 
     for item in receipt["items"]:
         c.add_row(f"{item['qty']} x {item['name']}", f"{item['line_total']} LE")

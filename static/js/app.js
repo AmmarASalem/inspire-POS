@@ -13,7 +13,7 @@ const state = {
   view: "dashboard",
   menu: null,               // [{name, image, items:[{id,name,name_ar,price}]}]
   activeMenuCategory: null,
-  checkout: { customerId: null, customer: null, cart: {}, mode: "checkout" }, // cart: {itemId: qty}, mode: "checkout" | "order"
+  checkout: { customerId: null, customer: null, cart: {}, mode: "checkout" }, // cart: {itemId: qty}, mode: "checkout" | "order" | "takeaway"
   lastReceipt: null,
   settings: null,
 };
@@ -93,6 +93,17 @@ function formatElapsed(seconds) {
   const s = seconds % 60;
   const pad = (n) => String(n).padStart(2, "0");
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+function formatDuration(seconds) {
+  // Coarser than formatElapsed()'s live timer: totals over a reporting period only
+  // need hours and minutes, not a ticking seconds column.
+  const total = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (total > 0 && h === 0 && m === 0) return "<1m";  // don't render a real stay as "0m"
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
 function statusLabel(status) {
@@ -423,14 +434,17 @@ async function loadReport() {
 }
 
 function renderReport(r) {
+  const takeawayCount = r.takeaway_count || 0;
   document.getElementById("report-range-label").textContent =
-    `${r.start} → ${r.end} · ${r.visit_count} visit${r.visit_count === 1 ? "" : "s"}`;
+    `${r.start} → ${r.end} · ${r.visit_count} visit${r.visit_count === 1 ? "" : "s"}`
+    + ` · ${takeawayCount} takeaway order${takeawayCount === 1 ? "" : "s"}`;
 
   document.getElementById("report-summary").innerHTML = `
     <div class="report-stat"><span class="rs-label">Total revenue</span><span class="rs-value">${r.total_revenue} LE</span></div>
     <div class="report-stat"><span class="rs-label">Time charges</span><span class="rs-value">${r.time_revenue} LE</span></div>
     <div class="report-stat"><span class="rs-label">Items</span><span class="rs-value">${r.items_revenue} LE</span></div>
     <div class="report-stat"><span class="rs-label">Private room</span><span class="rs-value">${r.premium_revenue} LE</span></div>
+    <div class="report-stat"><span class="rs-label">Takeaway</span><span class="rs-value">${r.takeaway_revenue || 0} LE</span></div>
   `;
 
   const ptbody = document.getElementById("report-products-tbody");
@@ -449,7 +463,7 @@ function renderReport(r) {
   cempty.hidden = r.top_customers.length !== 0;
   for (const c of r.top_customers) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td><td>${escapeHtml(c.phone)}</td><td>${c.visit_count}</td><td>${c.total_spent} LE</td>`;
+    tr.innerHTML = `<td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td><td>${escapeHtml(c.phone)}</td><td>${formatDuration(c.seconds_on_site)}</td><td>${c.total_spent} LE</td>`;
     ctbody.appendChild(tr);
   }
 }
@@ -673,6 +687,9 @@ async function openCheckoutModal(customerId, mode) {
     document.getElementById("checkout-modal-label").textContent = mode === "order" ? "Edit Order" : "Checkout";
     document.getElementById("checkout-customer-name").textContent = `${customer.first_name} ${customer.last_name}`;
     document.getElementById("payment-method-row").hidden = mode !== "checkout";
+    document.getElementById("checkout-premium-row").hidden = false;
+    document.getElementById("cart-time-line").hidden = false;
+    document.getElementById("cart-time-row").hidden = false;
     document.getElementById("checkout-payment-method").value = "cash";
     document.getElementById("checkout-premium-toggle").checked = !!customer.is_premium;
     const confirmBtn = document.getElementById("btn-confirm-checkout");
@@ -690,6 +707,29 @@ function openCheckout(customerId) {
 
 function openOrderEditor(customerId) {
   return openCheckoutModal(customerId, "order");
+}
+
+async function openTakeawayModal() {
+  // Same menu/cart UI, but with no customer at all: nobody is checked in, so the
+  // premium toggle and every time-charge line are hidden and only items are billed.
+  try {
+    await loadMenu();
+    state.checkout = { customerId: null, customer: null, cart: {}, mode: "takeaway" };
+    state.activeMenuCategory = state.menu[0]?.name || null;
+
+    document.getElementById("checkout-modal-label").textContent = "Takeaway Order";
+    document.getElementById("checkout-customer-name").textContent = "walk-in customer";
+    document.getElementById("payment-method-row").hidden = false;
+    document.getElementById("checkout-premium-row").hidden = true;
+    document.getElementById("cart-time-line").hidden = true;
+    document.getElementById("cart-time-row").hidden = true;
+    document.getElementById("checkout-payment-method").value = "cash";
+    document.getElementById("btn-confirm-checkout").textContent = "Charge & Print";
+    renderMenuTabs();
+    renderMenuItems();
+    renderCart();
+    document.getElementById("modal-checkout").hidden = false;
+  } catch (e) { toast(e.message, true); }
 }
 
 function renderMenuTabs() {
@@ -769,7 +809,7 @@ function changeQty(itemId, delta) {
 }
 
 function renderCart() {
-  const { customer, cart } = state.checkout;
+  const { customer, cart, mode } = state.checkout;
   const itemsEl = document.getElementById("cart-items");
   const emptyEl = document.getElementById("cart-empty");
   itemsEl.innerHTML = "";
@@ -786,6 +826,12 @@ function renderCart() {
     row.className = "cart-row-item";
     row.innerHTML = `<span>${qty} × ${escapeHtml(item.name)}</span><span>${lineTotal} LE</span>`;
     itemsEl.appendChild(row);
+  }
+
+  if (mode === "takeaway") {
+    document.getElementById("cart-items-cost").textContent = `${itemsCost} LE`;
+    document.getElementById("cart-total").textContent = `${itemsCost} LE`;
+    return;
   }
 
   const isPremium = !!customer.is_premium;
@@ -805,6 +851,16 @@ document.getElementById("btn-confirm-checkout").addEventListener("click", async 
   const { customerId, cart, mode } = state.checkout;
   const items = Object.entries(cart).map(([id, qty]) => ({ id: Number(id), qty }));
   try {
+    if (mode === "takeaway") {
+      if (items.length === 0) { toast("Add at least one item to the order.", true); return; }
+      const receipt = await api("/api/takeaway", {
+        method: "POST",
+        body: JSON.stringify({ items, payment_method: document.getElementById("checkout-payment-method").value }),
+      });
+      document.getElementById("modal-checkout").hidden = true;
+      showReceipt(receipt);
+      return;
+    }
     if (mode === "order") {
       await api(`/api/customers/${customerId}/order`, {
         method: "POST",
@@ -834,16 +890,18 @@ function showReceipt(r) {
   const itemsHtml = r.items.length
     ? r.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
     : `<div class="rline"><span>No items</span><span>—</span></div>`;
-  const timeLabel = r.is_premium
-    ? `Private room time charge (${r.billed_hours}h billed)`
-    : r.customer.status === "not_subscribed"
-      ? `Time charge (${r.billed_hours}h billed)`
-      : `Time charge (${statusLabel(r.customer.status)})`;
+  const headerHtml = r.takeaway
+    ? `<div class="rline"><span>Takeaway order</span><span>${escapeHtml(r.check_out)}</span></div>`
+    : `<div class="rline"><span>${escapeHtml(r.customer.first_name)} ${escapeHtml(r.customer.last_name)}</span><span>${escapeHtml(r.customer.phone)}</span></div>
+       <div class="rline"><span>Status</span><span>${statusLabel(r.customer.status)}</span></div>
+       <hr>
+       <div class="rline"><span>${escapeHtml(r.is_premium
+          ? `Private room time charge (${r.billed_hours}h billed)`
+          : r.customer.status === "not_subscribed"
+            ? `Time charge (${r.billed_hours}h billed)`
+            : `Time charge (${statusLabel(r.customer.status)})`)}</span><span>${r.time_cost} LE</span></div>`;
   body.innerHTML = `
-    <div class="rline"><span>${escapeHtml(r.customer.first_name)} ${escapeHtml(r.customer.last_name)}</span><span>${escapeHtml(r.customer.phone)}</span></div>
-    <div class="rline"><span>Status</span><span>${statusLabel(r.customer.status)}</span></div>
-    <hr>
-    <div class="rline"><span>${escapeHtml(timeLabel)}</span><span>${r.time_cost} LE</span></div>
+    ${headerHtml}
     <hr>
     ${itemsHtml}
     <hr>
@@ -971,6 +1029,8 @@ function setup() {
         .catch((err) => toast(err.message, true));
     }
   });
+
+  document.getElementById("btn-takeaway").addEventListener("click", openTakeawayModal);
 
   setupQuickCheckin();
   setupNewCustomerModal();

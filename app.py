@@ -566,12 +566,56 @@ def checkout_customer(customer_id):
     return jsonify(receipt)
 
 
+@app.route("/api/takeaway", methods=["POST"])
+def takeaway_order():
+    """Takeaway order for a walk-in buying food/drink to go: items only, no hourly
+    charge, no check-in and no customer record needed. Recorded in `visits` (so it
+    counts towards revenue reports) as a zero-length visit with a NULL customer_id."""
+    body = request.get_json(force=True) or {}
+    ordered_items = body.get("items", [])  # [{id, qty}]
+    payment_method = (body.get("payment_method") or "").strip() or None
+
+    conn = get_db()
+    items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
+    if not receipt_items:
+        conn.close()
+        return jsonify({"error": "Add at least one item to the order"}), 400
+
+    sold_at = now_str()
+    conn.execute(
+        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method, is_premium)
+           VALUES (NULL, ?, ?, 0, ?, ?, ?, ?, 0)""",
+        (sold_at, sold_at, items_cost, items_cost, json.dumps(receipt_items), payment_method),
+    )
+    conn.commit()
+    conn.close()
+
+    receipt = {
+        "takeaway": True,
+        "customer": None,
+        "check_in": sold_at,
+        "check_out": sold_at,
+        "is_premium": False,
+        "billed_hours": 0,
+        "time_cost": 0,
+        "items": receipt_items,
+        "items_cost": items_cost,
+        "total_cost": items_cost,
+    }
+
+    printed, print_message = receipt_printer.print_receipt(receipt)
+    receipt["printed"] = printed
+    receipt["print_message"] = print_message
+
+    return jsonify(receipt)
+
+
 @app.route("/api/print-receipt", methods=["POST"])
 def reprint_receipt():
     """Manual reprint — lets the cashier retry from the on-screen receipt if the
     printer was off/out of paper/etc. during the automatic print at checkout."""
     receipt = request.get_json(force=True) or {}
-    if not receipt.get("customer") or "total_cost" not in receipt:
+    if "total_cost" not in receipt or not (receipt.get("customer") or receipt.get("takeaway")):
         return jsonify({"error": "Invalid receipt data"}), 400
     printed, message = receipt_printer.print_receipt(receipt)
     return jsonify({"printed": printed, "message": message})
@@ -621,11 +665,18 @@ REPORT_PERIOD_DAYS = {"last_week": 7, "last_month": 30, "last_3_months": 90}
 def get_reports():
     """Revenue reporting over a time window: totals, per-product revenue, top
     customers. `period` is one of REPORT_PERIOD_DAYS' keys (a rolling window ending
-    now) or 'custom' with `start`/`end` query params (YYYY-MM-DD, end inclusive)."""
+    now), 'today' (the current business day, i.e. since the last
+    BUSINESS_DAY_RESET_HOUR:MINUTE), or 'custom' with `start`/`end` query params
+    (YYYY-MM-DD, end inclusive)."""
     period = request.args.get("period", "last_week")
     now = datetime.now()
 
-    if period == "custom":
+    if period == "today":
+        # Business day, not calendar day: the shop closes at 2am, so a session
+        # checked out at 1am still belongs to the day it started on.
+        start = full_day_end(now) - timedelta(days=1)
+        end = now
+    elif period == "custom":
         start_str = request.args.get("start")
         end_str = request.args.get("end")
         if not start_str or not end_str:
@@ -644,16 +695,22 @@ def get_reports():
     if start > end:
         return jsonify({"error": "start must be before end"}), 400
 
+    # The window's upper bound is exclusive, so a rolling window ending exactly at `now`
+    # would drop an order rung up in the same second the report was opened.
+    query_end = end if period == "custom" else end + timedelta(seconds=1)
+
     conn = get_db()
     rows = conn.execute(
         "SELECT * FROM visits WHERE check_out >= ? AND check_out < ? ORDER BY check_out",
-        (start.strftime(DT_FMT), end.strftime(DT_FMT)),
+        (start.strftime(DT_FMT), query_end.strftime(DT_FMT)),
     ).fetchall()
 
     total_revenue = 0
     time_revenue = 0
     items_revenue = 0
     premium_revenue = 0
+    takeaway_revenue = 0
+    takeaway_count = 0
     products = {}       # item id -> {id, name, qty, revenue}
     customer_totals = {}  # customer id -> {visit_count, total_spent}
 
@@ -675,9 +732,21 @@ def get_reports():
             entry["qty"] += it.get("qty", 0)
             entry["revenue"] += it.get("line_total", 0)
 
-        cust = customer_totals.setdefault(r["customer_id"], {"visit_count": 0, "total_spent": 0})
+        if r["customer_id"] is None:  # takeaway order — no customer to credit it to
+            takeaway_revenue += r["total_cost"]
+            takeaway_count += 1
+            continue
+        cust = customer_totals.setdefault(
+            r["customer_id"], {"visit_count": 0, "total_spent": 0, "seconds_on_site": 0}
+        )
         cust["visit_count"] += 1
         cust["total_spent"] += r["total_cost"]
+        try:
+            cust["seconds_on_site"] += int(
+                (parse_dt(r["check_out"]) - parse_dt(r["check_in"])).total_seconds()
+            )
+        except (TypeError, ValueError):
+            pass  # unparseable timestamp — count the money, skip the time
 
     customer_info = {}
     if customer_totals:
@@ -698,6 +767,7 @@ def get_reports():
             "last_name": info["last_name"] if info else "customer",
             "phone": info["phone"] if info else "",
             "visit_count": totals["visit_count"],
+            "seconds_on_site": totals["seconds_on_site"],
             "total_spent": totals["total_spent"],
         })
     top_customers.sort(key=lambda c: c["total_spent"], reverse=True)
@@ -705,11 +775,13 @@ def get_reports():
     return jsonify({
         "start": start.strftime(DT_FMT),
         "end": min(end, now).strftime(DT_FMT),
-        "visit_count": len(rows),
+        "visit_count": len(rows) - takeaway_count,
+        "takeaway_count": takeaway_count,
         "total_revenue": total_revenue,
         "time_revenue": time_revenue,
         "items_revenue": items_revenue,
         "premium_revenue": premium_revenue,
+        "takeaway_revenue": takeaway_revenue,
         "products": sorted(products.values(), key=lambda p: p["revenue"], reverse=True),
         "top_customers": top_customers[:10],
     })
