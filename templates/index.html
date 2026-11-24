@@ -77,7 +77,7 @@
     <section id="view-admin" class="view">
       <div class="view-header">
         <h1>Admin</h1>
-        <p class="subtle">Menu prices and customer management.</p>
+        <p class="subtle">Rates, reports, menu and customer management.</p>
       </div>
 
       <h2 class="admin-subhead">Rates &amp; Subscription Prices</h2>
@@ -86,17 +86,17 @@
           <h3>Hourly billing</h3>
           <div class="admin-menu-row">
             <span class="amr-name">First hour</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-first-hour">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-first-hour">
             <span>LE</span>
           </div>
           <div class="admin-menu-row">
             <span class="amr-name">Each additional hour</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-extra-hour">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-extra-hour">
             <span>LE</span>
           </div>
           <div class="admin-menu-row">
             <span class="amr-name">Daily cap (then free for the rest of the day)</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-daily-cap">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-daily-cap">
             <span>LE</span>
           </div>
         </div>
@@ -104,12 +104,12 @@
           <h3>Private room (premium) — everyone pays, no daily cap</h3>
           <div class="admin-menu-row">
             <span class="amr-name">First hour</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-premium-first-hour">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-premium-first-hour">
             <span>LE</span>
           </div>
           <div class="admin-menu-row">
             <span class="amr-name">Each additional hour</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-premium-extra-hour">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-premium-extra-hour">
             <span>LE</span>
           </div>
         </div>
@@ -117,17 +117,17 @@
           <h3>Subscription prices</h3>
           <div class="admin-menu-row">
             <span class="amr-name">Weekly</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-weekly">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-weekly">
             <span>LE</span>
           </div>
           <div class="admin-menu-row">
             <span class="amr-name">Monthly</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-monthly">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-monthly">
             <span>LE</span>
           </div>
           <div class="admin-menu-row">
             <span class="amr-name">Full Day</span>
-            <input type="number" min="0" step="1" class="amr-price" id="rate-full-day">
+            <input type="number" min="0" step="0.1" class="amr-price" id="rate-full-day">
             <span>LE</span>
           </div>
         </div>
@@ -153,6 +153,12 @@
         </div>
         <p id="report-range-label" class="subtle"></p>
         <div id="report-summary" class="report-summary"></div>
+        <h3>Payment Methods</h3>
+        <table class="data-table">
+          <thead><tr><th>Method</th><th>Transactions</th><th>Revenue</th></tr></thead>
+          <tbody id="report-payments-tbody"></tbody>
+        </table>
+        <p id="report-payments-empty" class="empty-state" hidden>No payments in this period.</p>
         <h3>Revenue by Product</h3>
         <table class="data-table">
           <thead><tr><th>Product</th><th>Qty sold</th><th>Revenue</th></tr></thead>
@@ -165,9 +171,30 @@
           <tbody id="report-customers-tbody"></tbody>
         </table>
         <p id="report-customers-empty" class="empty-state" hidden>No visits in this period.</p>
+        <h3>Receipts</h3>
+        <div class="report-receipts-scroll">
+          <table class="data-table">
+            <thead><tr><th>Date</th><th>Customer</th><th>Items</th><th>Payment</th><th>Discount</th><th>Total</th><th></th></tr></thead>
+            <tbody id="report-receipts-tbody"></tbody>
+          </table>
+        </div>
+        <p id="report-receipts-empty" class="empty-state" hidden>No receipts in this period.</p>
       </div>
 
-      <h2 class="admin-subhead">Menu Prices</h2>
+      <h2 class="admin-subhead">Menu</h2>
+      <form id="form-add-menu-item" class="admin-menu-list add-menu-item">
+        <h3>Add item</h3>
+        <div class="add-menu-item-fields">
+          <label>Category
+            <input type="text" id="ami-category" list="ami-category-options" required placeholder="Pick or type a new one">
+            <datalist id="ami-category-options"></datalist>
+          </label>
+          <label>Name<input type="text" id="ami-name" required></label>
+          <label>Arabic name (optional)<input type="text" id="ami-name-ar" dir="rtl"></label>
+          <label>Price (LE)<input type="number" id="ami-price" min="0" step="0.1" required class="amr-price"></label>
+          <button type="submit" class="btn btn-primary">Add Item</button>
+        </div>
+      </form>
       <div id="admin-menu-list" class="admin-menu-list"></div>
 
       <h2 class="admin-subhead">Customers</h2>
@@ -258,7 +285,7 @@
       <label class="plan-card">
         <input type="radio" name="plan" value="full_day">
         <span class="plan-title">Full Day</span>
-        <span class="plan-sub" id="plan-sub-full_day">100 LE — resets at 2:30am</span>
+        <span class="plan-sub" id="plan-sub-full_day">100 LE — valid for 24 hours</span>
       </label>
     </div>
     <label class="checkbox-row">
@@ -293,8 +320,16 @@
         <div class="cart-totals">
           <div class="cart-row" id="cart-time-row"><span>Time charge</span><span id="cart-time-cost">0 LE</span></div>
           <div class="cart-row"><span>Items</span><span id="cart-items-cost">0 LE</span></div>
-          <div class="cart-row cart-total"><span>Total</span><span id="cart-total">0 LE</span></div>
+          <div class="cart-row cart-subtotal" id="cart-subtotal-row" hidden><span>Total before discount</span><span id="cart-subtotal">0 LE</span></div>
+          <div class="cart-row" id="cart-discount-row" hidden><span id="cart-discount-label">Discount</span><span id="cart-discount-amount">0 LE</span></div>
+          <div class="cart-row cart-total"><span id="cart-total-label">Total</span><span id="cart-total">0 LE</span></div>
         </div>
+        <label id="discount-row" class="payment-method-row">Discount (optional)
+          <span class="discount-input-wrap">
+            <input type="number" id="checkout-discount" min="0" max="100" step="any" placeholder="0" inputmode="decimal">
+            <span>%</span>
+          </span>
+        </label>
         <label id="payment-method-row" class="payment-method-row">Payment method
           <select id="checkout-payment-method">
             <option value="cash">Cash</option>

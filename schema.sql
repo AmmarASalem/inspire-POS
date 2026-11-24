@@ -1,4 +1,9 @@
 -- Inspire Workspace & Cafe -- cashier system schema (SQLite)
+--
+-- Money columns (prices, rates, costs, totals) hold LE with up to one decimal place,
+-- e.g. 112.5. Some are declared INTEGER for historical reasons; SQLite stores a
+-- fractional value in them as REAL regardless, so no migration was needed when
+-- decimals were allowed. app.py rounds every amount with round_money().
 
 CREATE TABLE IF NOT EXISTS customers (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +40,9 @@ CREATE TABLE IF NOT EXISTS visits (
     total_cost    INTEGER NOT NULL DEFAULT 0,
     items_json    TEXT NOT NULL DEFAULT '[]',
     payment_method TEXT,
-    is_premium    INTEGER NOT NULL DEFAULT 0  -- whether this session billed at the private-room rate
+    is_premium    INTEGER NOT NULL DEFAULT 0,  -- whether this session billed at the private-room rate
+    discount_percent REAL NOT NULL DEFAULT 0,  -- optional checkout discount, % of time + items
+    discount_amount  INTEGER NOT NULL DEFAULT 0 -- in LE; total_cost is already net of this
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
@@ -53,5 +60,6 @@ CREATE TABLE IF NOT EXISTS settings (
     monthly_price       INTEGER NOT NULL DEFAULT 0,
     full_day_price      INTEGER NOT NULL DEFAULT 100,
     premium_first_hour_rate INTEGER NOT NULL DEFAULT 80,  -- private-room rate: everyone pays this,
-    premium_extra_hour_rate INTEGER NOT NULL DEFAULT 50   -- including subscribers, uncapped
+    premium_extra_hour_rate INTEGER NOT NULL DEFAULT 50,  -- including subscribers, uncapped
+    menu_version        INTEGER NOT NULL DEFAULT 0  -- which menu_data.py overhaul is seeded (database.MENU_VERSION)
 );

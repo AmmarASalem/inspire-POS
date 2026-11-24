@@ -89,20 +89,38 @@ def _migrate_visits_customer_id_nullable(conn):
     conn.execute("PRAGMA foreign_keys = ON")
 
 
-def _migrate_reseed_menu(conn):
-    """One-time reseed to the 2026-07 menu overhaul (new prices, new Pancake category).
-    Only runs if the new menu hasn't been applied yet, so it never clobbers prices an
-    admin has since edited by hand."""
+# Bump when menu_data.MENU_ITEMS is overhauled and existing tills should be reseeded
+# with it (wiping any admin price edits/added items, so only for a real overhaul).
+MENU_VERSION = 1  # 2026-07 overhaul
+
+
+def _seed_menu(conn):
     from menu_data import MENU_ITEMS
-    has_new_menu = conn.execute(
+    conn.execute("DELETE FROM menu_items")
+    conn.executemany(
+        "INSERT INTO menu_items (category, name, name_ar, price) VALUES (?, ?, ?, ?)",
+        MENU_ITEMS,
+    )
+    conn.execute("UPDATE settings SET menu_version=? WHERE id=1", (MENU_VERSION,))
+
+
+def _migrate_reseed_menu(conn):
+    """Reseed from menu_data.py once per MENU_VERSION bump, never on an ordinary
+    restart, so prices an admin edits and items they add survive. The version is
+    stored in settings.menu_version rather than inferred from which categories exist,
+    since admins can now delete items (deleting every item in a 'marker' category
+    would otherwise trigger a full wipe on the next restart)."""
+    version = conn.execute("SELECT menu_version FROM settings WHERE id=1").fetchone()["menu_version"]
+    if version >= MENU_VERSION:
+        return
+    # DBs from before menu_version existed: the Pancake category means the 2026-07
+    # menu (version 1) is already in place, so just record that instead of wiping.
+    if MENU_VERSION == 1 and conn.execute(
         "SELECT 1 FROM menu_items WHERE category='Pancake' LIMIT 1"
-    ).fetchone()
-    if not has_new_menu:
-        conn.execute("DELETE FROM menu_items")
-        conn.executemany(
-            "INSERT INTO menu_items (category, name, name_ar, price) VALUES (?, ?, ?, ?)",
-            MENU_ITEMS,
-        )
+    ).fetchone():
+        conn.execute("UPDATE settings SET menu_version=1 WHERE id=1")
+        return
+    _seed_menu(conn)
 
 
 def init_db():
@@ -116,19 +134,20 @@ def init_db():
     _ensure_column(conn, "visits", "is_premium", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "settings", "premium_first_hour_rate", "INTEGER NOT NULL DEFAULT 80")
     _ensure_column(conn, "settings", "premium_extra_hour_rate", "INTEGER NOT NULL DEFAULT 50")
+    _ensure_column(conn, "settings", "menu_version", "INTEGER NOT NULL DEFAULT 0")
     _migrate_drop_customers_status_check(conn)
     # after the _ensure_column calls above: this rebuild copies visits column-by-column,
     # so payment_method/is_premium have to exist by the time it runs
     _migrate_visits_customer_id_nullable(conn)
+    # ...and these must come AFTER that rebuild, which doesn't know about them and
+    # would otherwise silently drop them on a pre-takeaway DB
+    _ensure_column(conn, "visits", "discount_percent", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "visits", "discount_amount", "INTEGER NOT NULL DEFAULT 0")
     conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)")
 
     count = conn.execute("SELECT COUNT(*) AS n FROM menu_items").fetchone()["n"]
     if count == 0:
-        from menu_data import MENU_ITEMS
-        conn.executemany(
-            "INSERT INTO menu_items (category, name, name_ar, price) VALUES (?, ?, ?, ?)",
-            MENU_ITEMS,
-        )
+        _seed_menu(conn)
     else:
         _migrate_reseed_menu(conn)
     conn.commit()

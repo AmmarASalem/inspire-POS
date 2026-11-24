@@ -327,6 +327,27 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 .rs-value { font-size: 20px; font-weight: 700; color: var(--green); font-family: Georgia, serif; }
 #admin-reports h3 { font-size: 15px; margin: 18px 0 8px; }
 #admin-reports .data-table { margin-bottom: 6px; }
+.report-receipts-scroll { max-height: 480px; overflow-y: auto; border-radius: 12px; margin-bottom: 12px; }
+.report-receipts-scroll th { position: sticky; top: 0; z-index: 1; }
+.data-table .subtle { font-size: 12px; }
+.nowrap { white-space: nowrap; }
+
+.btn-danger-ghost { color: var(--danger); }
+.btn-danger-ghost:hover { background: #fbe4df; }
+
+/* ---------- Admin: add menu item ---------- */
+.add-menu-item { padding: 12px 18px 16px; margin-bottom: 12px; }
+.add-menu-item h3 { font-size: 15px; margin: 4px 0 10px; }
+.add-menu-item-fields { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.add-menu-item-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.add-menu-item-fields input[type="text"] { width: 190px; }
+.add-menu-item-fields .amr-price { width: 100px; padding: 9px 8px; background: var(--paper); }
 
 /* ---------- Modal ---------- */
 .modal-overlay {
@@ -488,6 +509,18 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
 }
 .payment-method-row select { margin-left: 10px; }
 .payment-method-row[hidden] { display: none; }
+.discount-input-wrap { display: flex; align-items: center; gap: 6px; }
+#checkout-discount {
+  width: 80px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  text-align: right;
+  background: var(--paper);
+}
+#checkout-discount.invalid { border-color: var(--danger); background: #fbe4df; }
 
 /* ---------- History ---------- */
 .history-list { max-height: 60vh; overflow-y: auto; margin-top: 10px; }
@@ -517,6 +550,14 @@ input[type="text"]:focus, input[type="tel"]:focus { border-color: var(--green-li
   margin-top: 6px;
 }
 .history-entry .h-payment { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.history-entry .h-discount {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13.5px;
+  padding: 2px 0;
+}
+.history-entry .h-items + .h-discount { border-top: 1px dashed var(--border); padding-top: 6px; margin-top: 6px; }
+.cart-subtotal, .receipt-subtotal { font-weight: 600; }
 
 /* ---------- Receipt ---------- */
 .receipt-body { font-size: 14px; }

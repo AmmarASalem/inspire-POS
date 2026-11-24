@@ -24,3 +24,9 @@ env/
 
 # Kiosk browser profile created on the till machine at runtime
 deploy/windows/kiosk-profile/
+
+# Runtime output on the till: server startup log, offline wheels. (backups/ is
+# left over from the old automated backup script, no longer written to.)
+backups/
+deploy/windows/server.log
+deploy/windows/wheels/

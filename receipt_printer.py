@@ -44,6 +44,15 @@ _small_font = ImageFont.truetype(str(FONT_DIR / "Montserrat-Regular.ttf"), 18)
 _measure = ImageDraw.Draw(Image.new("L", (1, 1)))
 
 
+def _le(amount):
+    """Money to one decimal place, dropping a trailing .0: 112.5 -> '112.5 LE',
+    125.0 -> '125 LE'."""
+    text = f"{round(float(amount), 1):.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text} LE"
+
+
 def _text_extent(text, font):
     """Exact (top, bottom) glyph extent for THIS string in THIS font — a generic
     sample string estimate can clip glyphs that extend further than the sample did."""
@@ -158,14 +167,21 @@ def build_receipt_image(receipt: dict) -> Image.Image:
             f"Time charge ({receipt['billed_hours']}h billed)" if status == "not_subscribed"
             else f"Time charge ({STATUS_LABELS.get(status, status)})"
         )
-        c.add_row(time_label, f"{receipt['time_cost']} LE")
+        c.add_row(time_label, _le(receipt["time_cost"]))
         c.add_separator()
 
     for item in receipt["items"]:
-        c.add_row(f"{item['qty']} x {item['name']}", f"{item['line_total']} LE")
+        c.add_row(f"{item['qty']} x {item['name']}", _le(item["line_total"]))
         c.add_separator()
 
-    c.add_row("TOTAL", f"{receipt['total_cost']} LE")
+    discount_amount = receipt.get("discount_amount") or 0
+    if discount_amount:
+        c.add_row("Total before discount", _le(receipt["total_cost"] + discount_amount))
+        c.add_row(f"Discount ({receipt.get('discount_percent', 0):g}%)", "-" + _le(discount_amount))
+        c.add_separator()
+        c.add_row("TOTAL AFTER DISCOUNT", _le(receipt["total_cost"]))
+    else:
+        c.add_row("TOTAL", _le(receipt["total_cost"]))
     c.add_separator()
 
     c.add_gap(4)

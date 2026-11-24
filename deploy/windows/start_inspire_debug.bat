@@ -23,7 +23,7 @@ pushd "%APPDIR%"
 echo Starting server in the foreground -- Ctrl+C to stop.
 echo If startup fails, the real error prints below.
 echo.
-"%PYTHON%" -c "import database; database.init_db(); from app import app; app.run(host='127.0.0.1', port=5000)"
+"%PYTHON%" "%APPDIR%\deploy\windows\run_server.py"
 popd
 
 echo.

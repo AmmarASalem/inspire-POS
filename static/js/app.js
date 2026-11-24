@@ -1,5 +1,9 @@
-const BUSINESS_DAY_RESET_HOUR = 2;
-const BUSINESS_DAY_RESET_MINUTE = 30;
+// Mirrors app.py: a day is 12am to 12am, and the daily hourly cap resets at it.
+const BUSINESS_DAY_RESET_HOUR = 0;
+const BUSINESS_DAY_RESET_MINUTE = 0;
+// Mirrors app.py's HOUR_GRACE_MINUTES: no hour is billed until this many minutes
+// into it, the first included (10m is free, 16m bills 1 hour, 2h08m bills 2).
+const HOUR_GRACE_MINUTES = 15;
 
 // Used until /api/settings resolves, and as a fallback shape — actual values always
 // come from the server (admin-editable, see Admin > Rates & Pricing).
@@ -42,6 +46,46 @@ function adminApi(path, opts = {}) {
   return api(path, { ...opts, headers: { ...(opts.headers || {}), "X-Admin-Pin": adminPin } });
 }
 
+// Run an admin-only action from anywhere in the app, asking for the PIN first if
+// this browser session hasn't unlocked admin mode yet.
+let pendingAdminAction = null;
+
+function withAdmin(action) {
+  if (adminPin) { action(); return; }
+  pendingAdminAction = action;
+  document.getElementById("modal-admin-pin").hidden = false;
+  document.getElementById("admin-pin-input").focus();
+}
+
+// All money allows one decimal place (mirrors app.py's round_money): every sum or
+// product of amounts is rounded so float noise never shows up as 112.50000001.
+function roundMoney(x) {
+  return Math.round((Number(x) || 0) * 10) / 10 + 0;
+}
+
+// Amount for display: "112.5 LE", or "125 LE" when there's no fraction.
+function le(amount) {
+  return roundMoney(amount) + " LE";
+}
+
+// Mirrors app.py's discount_amount_for() operation-for-operation (nearest 0.1 LE,
+// half up, worked out in tenths) so the cart preview matches the receipt exactly.
+function discountAmountFor(subtotal, pct) {
+  const subtotalTenths = Math.round(subtotal * 10);
+  return roundMoney(Math.floor(subtotalTenths * pct / 100 + 0.5) / 10);
+}
+
+// A money input: non-negative, at most one decimal place. null if invalid.
+function parseMoneyInput(raw) {
+  const n = Number(String(raw).trim());
+  if (String(raw).trim() === "" || !Number.isFinite(n) || n < 0) return null;
+  return Math.abs(n * 10 - Math.round(n * 10)) > 1e-6 ? null : roundMoney(n);
+}
+
+function formatPercent(pct) {
+  return `${Number(pct)}%`;
+}
+
 function parseServerDt(s) {
   // "YYYY-MM-DD HH:MM:SS" -> Date (local time)
   if (!s) return null;
@@ -61,7 +105,7 @@ async function loadSettings() {
   return state.settings;
 }
 
-function fullDayEndClient(start) {
+function nextDayBoundaryClient(start) {
   const cutoff = new Date(start.getFullYear(), start.getMonth(), start.getDate(),
     BUSINESS_DAY_RESET_HOUR, BUSINESS_DAY_RESET_MINUTE, 0, 0);
   return start < cutoff ? cutoff : new Date(cutoff.getTime() + 86400000);
@@ -75,12 +119,11 @@ function computeTimeCostClient(checkInStr, isPremium, now = new Date()) {
   let total = 0;
   let segmentStart = parseServerDt(checkInStr);
   while (segmentStart < now) {
-    const segmentEnd = new Date(Math.min(fullDayEndClient(segmentStart).getTime(), now.getTime()));
+    const segmentEnd = new Date(Math.min(nextDayBoundaryClient(segmentStart).getTime(), now.getTime()));
     const elapsedMinutes = (segmentEnd - segmentStart) / 60000;
-    const segCost = elapsedMinutes <= 60
-      ? firstRate
-      : firstRate + Math.ceil((elapsedMinutes - 60) / 60) * extraRate;
-    total += cap == null ? segCost : Math.min(segCost, cap);
+    const hours = Math.max(0, Math.ceil((elapsedMinutes - HOUR_GRACE_MINUTES) / 60));
+    const segCost = hours === 0 ? 0 : roundMoney(firstRate + (hours - 1) * extraRate);
+    total = roundMoney(total + (cap == null ? segCost : Math.min(segCost, cap)));
     segmentStart = segmentEnd;
   }
   return total;
@@ -190,7 +233,7 @@ function tickTimers() {
     const costEl = card.querySelector("[data-cost]");
     const isPremium = card.dataset.premium === "1";
     if (isPremium || card.dataset.status === "not_subscribed") {
-      costEl.textContent = `${computeTimeCostClient(card.dataset.checkin, isPremium, now)} LE so far`;
+      costEl.textContent = `${le(computeTimeCostClient(card.dataset.checkin, isPremium, now))} so far`;
     } else {
       costEl.textContent = "No hourly charge (subscribed)";
     }
@@ -284,6 +327,7 @@ function renderCustomers(customers) {
           : `<button class="btn btn-ghost btn-sm" data-checkin="${c.id}">Check in</button>`}
         <button class="btn btn-ghost btn-sm" data-upgrade="${c.id}" data-name="${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}">Upgrade</button>
         <button class="btn btn-ghost btn-sm" data-history="${c.id}" data-name="${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}">History</button>
+        <button class="btn btn-ghost btn-sm" data-edit-customer="${c.id}" title="Admin PIN required">Edit</button>
       </td>
     `;
     tbody.appendChild(tr);
@@ -325,6 +369,7 @@ function renderSubscriptions(customers) {
 
 async function refreshAdmin() {
   if (!adminPin) {
+    pendingAdminAction = null; // unlocking from here just loads the admin page
     document.getElementById("modal-admin-pin").hidden = false;
     document.getElementById("admin-pin-input").focus();
     return;
@@ -366,8 +411,8 @@ function setupAdminRates() {
       full_day_price: document.getElementById("rate-full-day").value,
     };
     for (const [key, val] of Object.entries(fields)) {
-      const n = Number(val);
-      if (!Number.isFinite(n) || n < 0) { toast("All rates must be non-negative numbers.", true); return; }
+      const n = parseMoneyInput(val);
+      if (n === null) { toast("Rates must be 0 or more, with at most one decimal place (e.g. 12.5).", true); return; }
       fields[key] = n;
     }
     try {
@@ -391,7 +436,10 @@ function setupAdminPinModal() {
       sessionStorage.setItem("adminPin", pin);
       modal.hidden = true;
       form.reset();
-      refreshAdmin();
+      const action = pendingAdminAction;
+      pendingAdminAction = null;
+      if (action) action();
+      if (state.view === "admin") refreshAdmin();
     } catch (e2) {
       errorEl.hidden = false;
     }
@@ -440,12 +488,24 @@ function renderReport(r) {
     + ` · ${takeawayCount} takeaway order${takeawayCount === 1 ? "" : "s"}`;
 
   document.getElementById("report-summary").innerHTML = `
-    <div class="report-stat"><span class="rs-label">Total revenue</span><span class="rs-value">${r.total_revenue} LE</span></div>
-    <div class="report-stat"><span class="rs-label">Time charges</span><span class="rs-value">${r.time_revenue} LE</span></div>
-    <div class="report-stat"><span class="rs-label">Items</span><span class="rs-value">${r.items_revenue} LE</span></div>
-    <div class="report-stat"><span class="rs-label">Private room</span><span class="rs-value">${r.premium_revenue} LE</span></div>
-    <div class="report-stat"><span class="rs-label">Takeaway</span><span class="rs-value">${r.takeaway_revenue || 0} LE</span></div>
+    <div class="report-stat"><span class="rs-label">Total revenue</span><span class="rs-value">${le(r.total_revenue)}</span></div>
+    <div class="report-stat"><span class="rs-label">Time charges</span><span class="rs-value">${le(r.time_revenue)}</span></div>
+    <div class="report-stat"><span class="rs-label">Items</span><span class="rs-value">${le(r.items_revenue)}</span></div>
+    <div class="report-stat"><span class="rs-label">Private room</span><span class="rs-value">${le(r.premium_revenue)}</span></div>
+    <div class="report-stat"><span class="rs-label">Takeaway</span><span class="rs-value">${le(r.takeaway_revenue || 0)}</span></div>
+    <div class="report-stat"><span class="rs-label">Discounts given</span><span class="rs-value">${r.discount_total ? "−" : ""}${le(r.discount_total)}</span></div>
   `;
+
+  const paytbody = document.getElementById("report-payments-tbody");
+  paytbody.innerHTML = "";
+  document.getElementById("report-payments-empty").hidden = r.payment_methods.length !== 0;
+  for (const p of r.payment_methods) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(paymentLabel(p.method))}</td><td>${p.count}</td><td>${le(p.revenue)}</td>`;
+    paytbody.appendChild(tr);
+  }
+
+  renderReportReceipts(r.receipts);
 
   const ptbody = document.getElementById("report-products-tbody");
   const pempty = document.getElementById("report-products-empty");
@@ -453,7 +513,7 @@ function renderReport(r) {
   pempty.hidden = r.products.length !== 0;
   for (const p of r.products) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(p.name || "—")}</td><td>${p.qty}</td><td>${p.revenue} LE</td>`;
+    tr.innerHTML = `<td>${escapeHtml(p.name || "—")}</td><td>${p.qty}</td><td>${le(p.revenue)}</td>`;
     ptbody.appendChild(tr);
   }
 
@@ -463,9 +523,46 @@ function renderReport(r) {
   cempty.hidden = r.top_customers.length !== 0;
   for (const c of r.top_customers) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td><td>${escapeHtml(c.phone)}</td><td>${formatDuration(c.seconds_on_site)}</td><td>${c.total_spent} LE</td>`;
+    tr.innerHTML = `<td>${escapeHtml(c.first_name)} ${escapeHtml(c.last_name)}</td><td>${escapeHtml(c.phone)}</td><td>${formatDuration(c.seconds_on_site)}</td><td>${le(c.total_spent)}</td>`;
     ctbody.appendChild(tr);
   }
+}
+
+function renderReportReceipts(receipts) {
+  const tbody = document.getElementById("report-receipts-tbody");
+  tbody.innerHTML = "";
+  document.getElementById("report-receipts-empty").hidden = receipts.length !== 0;
+  for (const rec of receipts) {
+    const itemsText = rec.items.length
+      ? rec.items.map((i) => `${i.qty} × ${i.name}`).join(", ")
+      : "—";
+    const who = rec.customer_name === null ? "Takeaway" : rec.customer_name;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="nowrap">${escapeHtml(rec.check_out)}</td>
+      <td>${escapeHtml(who)}${rec.time_cost ? `<div class="subtle">time ${le(rec.time_cost)}</div>` : ""}</td>
+      <td>${escapeHtml(itemsText)}</td>
+      <td>${escapeHtml(paymentLabel(rec.payment_method))}</td>
+      <td>${rec.discount_amount ? `${formatPercent(rec.discount_percent)} (−${le(rec.discount_amount)})` : "—"}</td>
+      <td class="nowrap">${rec.discount_amount
+        ? `<div class="subtle">before: ${le(rec.total_cost + rec.discount_amount)}</div>after: ${le(rec.total_cost)}`
+        : `${le(rec.total_cost)}`}</td>
+      <td><button class="btn btn-ghost btn-sm btn-danger-ghost" data-delete-receipt="${rec.id}">Delete</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-delete-receipt]").forEach((btn) =>
+    btn.addEventListener("click", () => deleteReceipt(Number(btn.dataset.deleteReceipt)))
+  );
+}
+
+async function deleteReceipt(id) {
+  if (!confirm("Delete this receipt? It will be removed from reports and session history. This cannot be undone.")) return;
+  try {
+    await adminApi(`/api/visits/${id}`, { method: "DELETE" });
+    toast("Receipt deleted.");
+    loadReport();
+  } catch (e) { toast(e.message, true); }
 }
 
 function renderAdminMenu(menu) {
@@ -482,20 +579,46 @@ function renderAdminMenu(menu) {
       row.className = "admin-menu-row";
       row.innerHTML = `
         <span class="amr-name">${escapeHtml(item.name)} <span class="amr-name-ar">${escapeHtml(item.name_ar || "")}</span></span>
-        <input type="number" min="0" step="1" class="amr-price" value="${item.price}" data-id="${item.id}">
+        <input type="number" min="0" step="0.1" class="amr-price" value="${item.price}" data-id="${item.id}">
         <span>LE</span>
         <button class="btn btn-ghost btn-sm" data-save-price="${item.id}">Save</button>
+        <button class="btn btn-ghost btn-sm btn-danger-ghost" data-delete-item="${item.id}" data-name="${escapeHtml(item.name)}">Delete</button>
       `;
       section.appendChild(row);
     }
+    if (cat.items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "subtle";
+      empty.textContent = "No items in this category.";
+      section.appendChild(empty);
+    }
     container.appendChild(section);
   }
+
+  const datalist = document.getElementById("ami-category-options");
+  datalist.innerHTML = "";
+  for (const cat of menu) {
+    const opt = document.createElement("option");
+    opt.value = cat.name;
+    datalist.appendChild(opt);
+  }
+
+  container.querySelectorAll("[data-delete-item]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Remove "${btn.dataset.name}" from the menu? Past receipts keep it.`)) return;
+      try {
+        await adminApi(`/api/menu/${btn.dataset.deleteItem}`, { method: "DELETE" });
+        toast("Item removed.");
+        refreshAdmin();
+      } catch (e) { toast(e.message, true); }
+    });
+  });
   container.querySelectorAll("[data-save-price]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = Number(btn.dataset.savePrice);
       const input = container.querySelector(`input[data-id="${id}"]`);
-      const price = Number(input.value);
-      if (!Number.isFinite(price) || price < 0) { toast("Invalid price.", true); return; }
+      const price = parseMoneyInput(input.value);
+      if (price === null) { toast("Price must be 0 or more, with at most one decimal place (e.g. 12.5).", true); return; }
       try {
         await adminApi(`/api/menu/${id}`, { method: "PUT", body: JSON.stringify({ price }) });
         toast("Price updated.");
@@ -505,11 +628,34 @@ function renderAdminMenu(menu) {
   });
 }
 
+function setupAddMenuItemForm() {
+  const form = document.getElementById("form-add-menu-item");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = {
+      category: document.getElementById("ami-category").value.trim(),
+      name: document.getElementById("ami-name").value.trim(),
+      name_ar: document.getElementById("ami-name-ar").value.trim(),
+      price: parseMoneyInput(document.getElementById("ami-price").value),
+    };
+    if (!body.category || !body.name) { toast("Category and name are required.", true); return; }
+    if (body.price === null) { toast("Price must be 0 or more, with at most one decimal place (e.g. 12.5).", true); return; }
+    try {
+      await adminApi("/api/menu", { method: "POST", body: JSON.stringify(body) });
+      toast(`Added ${body.name}.`);
+      // keep the category filled in, since items are usually added a few at a time
+      document.getElementById("ami-name").value = "";
+      document.getElementById("ami-name-ar").value = "";
+      document.getElementById("ami-price").value = "";
+      document.getElementById("ami-name").focus();
+      refreshAdmin();
+    } catch (e2) { toast(e2.message, true); }
+  });
+}
+
 let adminEditCustomerId = null;
-let adminCustomersCache = [];
 
 function renderAdminCustomers(customers) {
-  adminCustomersCache = customers;
   const tbody = document.getElementById("admin-customers-tbody");
   tbody.innerHTML = "";
   for (const c of customers) {
@@ -535,9 +681,9 @@ function renderAdminCustomers(customers) {
   );
 }
 
-function openAdminEditCustomer(id) {
-  const c = adminCustomersCache.find((x) => x.id === id);
-  if (!c) return;
+async function openAdminEditCustomer(id) {
+  let c;
+  try { c = await api(`/api/customers/${id}`); } catch (e) { toast(e.message, true); return; }
   adminEditCustomerId = id;
   document.getElementById("aec-first").value = c.first_name;
   document.getElementById("aec-last").value = c.last_name;
@@ -563,7 +709,8 @@ function setupAdminEditCustomerModal() {
       await adminApi(`/api/customers/${adminEditCustomerId}`, { method: "PUT", body: JSON.stringify(body) });
       document.getElementById("modal-admin-edit-customer").hidden = true;
       toast("Customer updated.");
-      refreshAdmin();
+      if (state.view === "admin") refreshAdmin();
+      if (state.view === "dashboard") refreshDashboard();
       if (state.view === "customers") refreshCustomers();
       if (state.view === "subscriptions") refreshSubscriptions();
     } catch (e2) {
@@ -635,9 +782,9 @@ function setupUpgradeModal() {
     errorEl.hidden = true;
     try { await loadSettings(); } catch (e2) { /* fall back to defaults */ }
     const s = settings();
-    document.getElementById("plan-sub-weekly").textContent = `Valid for 7 days — ${s.weekly_price} LE`;
-    document.getElementById("plan-sub-monthly").textContent = `Valid for 30 days — ${s.monthly_price} LE`;
-    document.getElementById("plan-sub-full_day").textContent = `${s.full_day_price} LE — resets at 2:30am`;
+    document.getElementById("plan-sub-weekly").textContent = `Valid for 7 days — ${le(s.weekly_price)}`;
+    document.getElementById("plan-sub-monthly").textContent = `Valid for 30 days — ${le(s.monthly_price)}`;
+    document.getElementById("plan-sub-full_day").textContent = `${le(s.full_day_price)} — valid for 24 hours`;
     modal.hidden = false;
   });
 
@@ -687,6 +834,8 @@ async function openCheckoutModal(customerId, mode) {
     document.getElementById("checkout-modal-label").textContent = mode === "order" ? "Edit Order" : "Checkout";
     document.getElementById("checkout-customer-name").textContent = `${customer.first_name} ${customer.last_name}`;
     document.getElementById("payment-method-row").hidden = mode !== "checkout";
+    document.getElementById("discount-row").hidden = mode !== "checkout";
+    document.getElementById("checkout-discount").value = "";
     document.getElementById("checkout-premium-row").hidden = false;
     document.getElementById("cart-time-line").hidden = false;
     document.getElementById("cart-time-row").hidden = false;
@@ -720,6 +869,8 @@ async function openTakeawayModal() {
     document.getElementById("checkout-modal-label").textContent = "Takeaway Order";
     document.getElementById("checkout-customer-name").textContent = "walk-in customer";
     document.getElementById("payment-method-row").hidden = false;
+    document.getElementById("discount-row").hidden = false;
+    document.getElementById("checkout-discount").value = "";
     document.getElementById("checkout-premium-row").hidden = true;
     document.getElementById("cart-time-line").hidden = true;
     document.getElementById("cart-time-row").hidden = true;
@@ -760,7 +911,7 @@ function renderMenuItems() {
     div.innerHTML = `
       <div class="mi-name">${escapeHtml(item.name)}</div>
       <div class="mi-name-ar">${escapeHtml(item.name_ar || "")}</div>
-      <div class="mi-price">${item.price} LE</div>
+      <div class="mi-price">${le(item.price)}</div>
       <div class="mi-controls">
         <button class="qty-btn" data-dec="${item.id}">−</button>
         <span class="qty-val">${qty}</span>
@@ -820,42 +971,68 @@ function renderCart() {
   for (const [id, qty] of entries) {
     const item = findMenuItemById(Number(id));
     if (!item) continue;
-    const lineTotal = item.price * qty;
-    itemsCost += lineTotal;
+    const lineTotal = roundMoney(item.price * qty);
+    itemsCost = roundMoney(itemsCost + lineTotal);
     const row = document.createElement("div");
     row.className = "cart-row-item";
-    row.innerHTML = `<span>${qty} × ${escapeHtml(item.name)}</span><span>${lineTotal} LE</span>`;
+    row.innerHTML = `<span>${qty} × ${escapeHtml(item.name)}</span><span>${le(lineTotal)}</span>`;
     itemsEl.appendChild(row);
   }
 
-  if (mode === "takeaway") {
-    document.getElementById("cart-items-cost").textContent = `${itemsCost} LE`;
-    document.getElementById("cart-total").textContent = `${itemsCost} LE`;
-    return;
+  let timeCost = 0;
+  if (mode !== "takeaway") {
+    const isPremium = !!customer.is_premium;
+    const chargeable = isPremium || customer.status === "not_subscribed";
+    timeCost = chargeable ? computeTimeCostClient(customer.check_in_time, isPremium) : 0;
+    document.getElementById("cart-time-line").textContent = isPremium
+      ? `Private room since ${customer.check_in_time.split(" ")[1]} — billed hourly (premium rate)`
+      : chargeable
+        ? `Checked in at ${customer.check_in_time.split(" ")[1]} — billed hourly`
+        : `${statusLabel(customer.status)} subscriber — no hourly charge`;
+    document.getElementById("cart-time-cost").textContent = `${le(timeCost)}`;
   }
+  document.getElementById("cart-items-cost").textContent = `${le(itemsCost)}`;
 
-  const isPremium = !!customer.is_premium;
-  const chargeable = isPremium || customer.status === "not_subscribed";
-  const timeCost = chargeable ? computeTimeCostClient(customer.check_in_time, isPremium) : 0;
-  document.getElementById("cart-time-line").textContent = isPremium
-    ? `Private room since ${customer.check_in_time.split(" ")[1]} — billed hourly (premium rate)`
-    : chargeable
-      ? `Checked in at ${customer.check_in_time.split(" ")[1]} — billed hourly`
-      : `${statusLabel(customer.status)} subscriber — no hourly charge`;
-  document.getElementById("cart-time-cost").textContent = `${timeCost} LE`;
-  document.getElementById("cart-items-cost").textContent = `${itemsCost} LE`;
-  document.getElementById("cart-total").textContent = `${timeCost + itemsCost} LE`;
+  const subtotal = roundMoney(timeCost + itemsCost);
+  const pct = mode === "order" ? 0 : readDiscountPercent();
+  const discountRow = document.getElementById("cart-discount-row");
+  const validPct = pct !== null && pct > 0;
+  const discount = validPct ? discountAmountFor(subtotal, pct) : 0;
+  discountRow.hidden = !validPct;
+  document.getElementById("cart-subtotal-row").hidden = !validPct;
+  if (validPct) {
+    document.getElementById("cart-subtotal").textContent = `${le(subtotal)}`;
+    document.getElementById("cart-discount-label").textContent = `Discount (${formatPercent(pct)})`;
+    document.getElementById("cart-discount-amount").textContent = `−${le(discount)}`;
+  }
+  document.getElementById("checkout-discount").classList.toggle("invalid", pct === null);
+  document.getElementById("cart-total-label").textContent = validPct ? "Total after discount" : "Total";
+  document.getElementById("cart-total").textContent = `${le(subtotal - discount)}`;
+}
+
+// The optional discount box: 0 when blank, null when it holds something invalid.
+function readDiscountPercent() {
+  const raw = document.getElementById("checkout-discount").value.trim();
+  if (raw === "") return 0;
+  const pct = Number(raw);
+  return Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null;
 }
 
 document.getElementById("btn-confirm-checkout").addEventListener("click", async () => {
   const { customerId, cart, mode } = state.checkout;
   const items = Object.entries(cart).map(([id, qty]) => ({ id: Number(id), qty }));
+  const discountPercent = mode === "order" ? 0 : readDiscountPercent();
+  if (discountPercent === null) { toast("Discount must be a percentage between 0 and 100.", true); return; }
   try {
     if (mode === "takeaway") {
       if (items.length === 0) { toast("Add at least one item to the order.", true); return; }
       const receipt = await api("/api/takeaway", {
         method: "POST",
-        body: JSON.stringify({ items, payment_method: document.getElementById("checkout-payment-method").value }),
+        body: JSON.stringify({
+          items,
+          payment_method: document.getElementById("checkout-payment-method").value,
+          discount_percent: discountPercent,
+        }),
       });
       document.getElementById("modal-checkout").hidden = true;
       showReceipt(receipt);
@@ -875,7 +1052,7 @@ document.getElementById("btn-confirm-checkout").addEventListener("click", async 
     const paymentMethod = document.getElementById("checkout-payment-method").value;
     const receipt = await api(`/api/customers/${customerId}/checkout`, {
       method: "POST",
-      body: JSON.stringify({ items, payment_method: paymentMethod }),
+      body: JSON.stringify({ items, payment_method: paymentMethod, discount_percent: discountPercent }),
     });
     document.getElementById("modal-checkout").hidden = true;
     showReceipt(receipt);
@@ -888,7 +1065,7 @@ function showReceipt(r) {
   state.lastReceipt = r;
   const body = document.getElementById("receipt-body");
   const itemsHtml = r.items.length
-    ? r.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
+    ? r.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${le(i.line_total)}</span></div>`).join("")
     : `<div class="rline"><span>No items</span><span>—</span></div>`;
   const headerHtml = r.takeaway
     ? `<div class="rline"><span>Takeaway order</span><span>${escapeHtml(r.check_out)}</span></div>`
@@ -899,14 +1076,23 @@ function showReceipt(r) {
           ? `Private room time charge (${r.billed_hours}h billed)`
           : r.customer.status === "not_subscribed"
             ? `Time charge (${r.billed_hours}h billed)`
-            : `Time charge (${statusLabel(r.customer.status)})`)}</span><span>${r.time_cost} LE</span></div>`;
+            : `Time charge (${statusLabel(r.customer.status)})`)}</span><span>${le(r.time_cost)}</span></div>`;
+  const discountHtml = r.discount_amount
+    ? `<div class="rline receipt-subtotal"><span>Total before discount</span><span>${le(r.total_cost + r.discount_amount)}</span></div>
+       <div class="rline"><span>Discount (${formatPercent(r.discount_percent)})</span><span>−${le(r.discount_amount)}</span></div>`
+    : "";
+  const paymentHtml = r.payment_method
+    ? `<div class="rline subtle"><span>Paid by</span><span>${escapeHtml(paymentLabel(r.payment_method))}</span></div>`
+    : "";
   body.innerHTML = `
     ${headerHtml}
     <hr>
     ${itemsHtml}
     <hr>
-    <div class="rline"><span>Items subtotal</span><span>${r.items_cost} LE</span></div>
-    <div class="rline receipt-total"><span>Total due</span><span>${r.total_cost} LE</span></div>
+    <div class="rline"><span>Items subtotal</span><span>${le(r.items_cost)}</span></div>
+    ${discountHtml}
+    <div class="rline receipt-total"><span>${r.discount_amount ? "Total after discount" : "Total due"}</span><span>${le(r.total_cost)}</span></div>
+    ${paymentHtml}
   `;
   renderPrintStatus("printed" in r ? r.printed : null, r.print_message);
   document.getElementById("modal-receipt").hidden = false;
@@ -951,6 +1137,11 @@ document.getElementById("btn-reprint").addEventListener("click", async () => {
 
 const paymentMethodLabel = { cash: "Cash", instapay: "InstaPay", card: "Card", wallet: "Mobile wallet", other: "Other" };
 
+function paymentLabel(method) {
+  if (!method || method === "unknown") return "Not recorded";
+  return paymentMethodLabel[method] || method;
+}
+
 async function openHistory(customerId, name) {
   document.getElementById("history-customer-name").textContent = name || "";
   document.getElementById("modal-history").hidden = false;
@@ -969,7 +1160,7 @@ function renderHistory(visits) {
   empty.hidden = visits.length !== 0;
   for (const v of visits) {
     const itemsHtml = v.items.length
-      ? v.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${i.line_total} LE</span></div>`).join("")
+      ? v.items.map((i) => `<div class="rline"><span>${i.qty} × ${escapeHtml(i.name)}</span><span>${le(i.line_total)}</span></div>`).join("")
       : `<div class="rline"><span>No items ordered</span><span>—</span></div>`;
     const payment = v.payment_method ? (paymentMethodLabel[v.payment_method] || v.payment_method) : "—";
     const div = document.createElement("div");
@@ -977,7 +1168,11 @@ function renderHistory(visits) {
     div.innerHTML = `
       <div class="h-head"><span>Checked in ${v.check_in}</span><span>Checked out ${v.check_out}</span></div>
       <div class="h-items">${itemsHtml}</div>
-      <div class="h-totals"><span>Total (time ${v.time_cost} LE${v.is_premium ? " · private room" : ""} + items ${v.items_cost} LE)</span><span>${v.total_cost} LE</span></div>
+      ${v.discount_amount ? `
+      <div class="h-discount"><span>Total before discount (time ${le(v.time_cost)}${v.is_premium ? " · private room" : ""} + items ${le(v.items_cost)})</span><span>${le(v.total_cost + v.discount_amount)}</span></div>
+      <div class="h-discount"><span>Discount (${formatPercent(v.discount_percent)})</span><span>−${le(v.discount_amount)}</span></div>
+      <div class="h-totals"><span>Total after discount</span><span>${le(v.total_cost)}</span></div>` : `
+      <div class="h-totals"><span>Total (time ${le(v.time_cost)}${v.is_premium ? " · private room" : ""} + items ${le(v.items_cost)})</span><span>${le(v.total_cost)}</span></div>`}
       <div class="h-payment">Payment method: ${escapeHtml(payment)}</div>
     `;
     list.appendChild(div);
@@ -1012,6 +1207,12 @@ function setup() {
     if (editOrderBtn) { openOrderEditor(Number(editOrderBtn.dataset.editOrder)); return; }
     const historyBtn = e.target.closest("[data-history]");
     if (historyBtn) { openHistory(Number(historyBtn.dataset.history), historyBtn.dataset.name); return; }
+    const editCustomerBtn = e.target.closest("[data-edit-customer]");
+    if (editCustomerBtn) {
+      const id = Number(editCustomerBtn.dataset.editCustomer);
+      withAdmin(() => openAdminEditCustomer(id));
+      return;
+    }
     const premiumBtn = e.target.closest("[data-toggle-premium]");
     if (premiumBtn) {
       const id = Number(premiumBtn.dataset.togglePremium);
@@ -1031,6 +1232,7 @@ function setup() {
   });
 
   document.getElementById("btn-takeaway").addEventListener("click", openTakeawayModal);
+  document.getElementById("checkout-discount").addEventListener("input", renderCart);
 
   setupQuickCheckin();
   setupNewCustomerModal();
@@ -1039,6 +1241,7 @@ function setup() {
   setupAdminEditCustomerModal();
   setupAdminRates();
   setupAdminReports();
+  setupAddMenuItemForm();
 
   tickClock();
   setInterval(tickClock, 1000);

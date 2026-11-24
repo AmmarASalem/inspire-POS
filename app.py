@@ -21,14 +21,19 @@ SETTINGS_FIELDS = (
 SUBSCRIPTION_DURATIONS = {
     "weekly": timedelta(days=7),
     "monthly": timedelta(days=30),
+    "full_day": timedelta(hours=24),  # 24h from purchase — the shop runs 24/7
 }
 SUBSCRIPTION_STATUSES = ("weekly", "monthly", "full_day")
 
-# Shop is open 8am-2am, so a full-day pass bought at any point during that window
-# expires at the *next* occurrence of this time, not 24h after purchase. Set a bit
-# past the official 2am close so a customer leaving a few minutes late isn't cut off.
-BUSINESS_DAY_RESET_HOUR = 2
-BUSINESS_DAY_RESET_MINUTE = 30
+# The shop runs 24/7 and a "day" is a calendar day, 12am to 12am: the daily hourly
+# cap resets at this time, and reports use the same midnight boundary.
+BUSINESS_DAY_RESET_HOUR = 0
+BUSINESS_DAY_RESET_MINUTE = 0
+
+# No hour is billed until this many minutes into it, including the first: a 10m stay
+# is free, 16m bills 1 hour, 2h08m bills 2, 2h16m bills 3. Mirrored in
+# static/js/app.js for the live running total.
+HOUR_GRACE_MINUTES = 15
 
 # One-time-setup placeholder — change this before the till goes live.
 ADMIN_PIN = os.environ.get("INSPIRE_ADMIN_PIN", "1234")
@@ -53,30 +58,44 @@ def parse_dt(s):
     return datetime.strptime(s, DT_FMT)
 
 
+def round_money(x):
+    """All money (prices, rates, totals) allows one decimal place, e.g. 112.5 LE.
+    Every sum/product of amounts goes through this so float noise like
+    112.50000000000001 never reaches the DB, a receipt, or a report."""
+    return round(float(x) + 0.0, 1) + 0.0  # + 0.0 turns -0.0 into 0.0
+
+
+def parse_money(raw):
+    """A non-negative amount with at most one decimal place. Raises ValueError."""
+    value = float(raw)
+    if not math.isfinite(value) or value < 0 or abs(value * 10 - round(value * 10)) > 1e-6:
+        raise ValueError
+    return round_money(value)
+
+
 def get_settings(conn):
     row = conn.execute("SELECT * FROM settings WHERE id=1").fetchone()
     return {field: row[field] for field in SETTINGS_FIELDS}
 
 
 def compute_time_cost(check_in_str, first_hour_rate, extra_hour_rate, daily_cap=None, at=None):
-    """First hour flat, every additional started hour at the extra rate, capped at
-    daily_cap per business day (BUSINESS_DAY_RESET_HOUR:MINUTE to the next occurrence,
-    unless daily_cap is None) — a stay spanning multiple business days re-applies the
-    cap each day rather than being capped once for the whole stay."""
+    """First hour flat, then the extra rate for every additional hour — each hour
+    (the first included) billed only once more than HOUR_GRACE_MINUTES of it have
+    passed, so a stay of HOUR_GRACE_MINUTES or less is free — capped at daily_cap per business day
+    (BUSINESS_DAY_RESET_HOUR:MINUTE to the next occurrence, unless daily_cap is None)
+    — a stay spanning multiple business days re-applies the cap each day rather than
+    being capped once for the whole stay."""
     at = at or datetime.now()
 
     total_cost = 0
     total_hours = 0
     segment_start = parse_dt(check_in_str)
     while segment_start < at:
-        segment_end = min(full_day_end(segment_start), at)
+        segment_end = min(next_day_boundary(segment_start), at)
         elapsed_minutes = (segment_end - segment_start).total_seconds() / 60
-        if elapsed_minutes <= 60:
-            seg_cost, seg_hours = first_hour_rate, 1
-        else:
-            extra_hours = math.ceil((elapsed_minutes - 60) / 60)
-            seg_cost, seg_hours = first_hour_rate + extra_hours * extra_hour_rate, 1 + extra_hours
-        total_cost += seg_cost if daily_cap is None else min(seg_cost, daily_cap)
+        seg_hours = max(0, math.ceil((elapsed_minutes - HOUR_GRACE_MINUTES) / 60))
+        seg_cost = 0 if seg_hours == 0 else round_money(first_hour_rate + (seg_hours - 1) * extra_hour_rate)
+        total_cost = round_money(total_cost + (seg_cost if daily_cap is None else min(seg_cost, daily_cap)))
         total_hours += seg_hours
         segment_start = segment_end
     return total_cost, total_hours
@@ -96,8 +115,9 @@ def time_cost_for(check_in_str, is_premium, settings, at=None):
     )
 
 
-def full_day_end(start):
-    """The next BUSINESS_DAY_RESET_HOUR:MINUTE (2:30am) at or after `start`."""
+def next_day_boundary(start):
+    """The next BUSINESS_DAY_RESET_HOUR:MINUTE (midnight) after `start` — where the
+    daily hourly cap resets."""
     cutoff = start.replace(hour=BUSINESS_DAY_RESET_HOUR, minute=BUSINESS_DAY_RESET_MINUTE,
                             second=0, microsecond=0)
     return cutoff if start < cutoff else cutoff + timedelta(days=1)
@@ -107,10 +127,7 @@ def compute_subscription_end(status, subscription_start):
     """Returns the datetime a weekly/monthly/full_day pass expires, or None."""
     if not subscription_start or status not in SUBSCRIPTION_STATUSES:
         return None
-    start = parse_dt(subscription_start)
-    if status == "full_day":
-        return full_day_end(start)
-    return start + SUBSCRIPTION_DURATIONS[status]
+    return parse_dt(subscription_start) + SUBSCRIPTION_DURATIONS[status]
 
 
 def sync_customer_status(conn, row):
@@ -195,14 +212,10 @@ def admin_update_settings():
         if field not in body:
             continue
         try:
-            value = int(body[field])
+            updated[field] = parse_money(body[field])
         except (TypeError, ValueError):
             conn.close()
-            return jsonify({"error": f"{field} must be a number"}), 400
-        if value < 0:
-            conn.close()
-            return jsonify({"error": f"{field} must not be negative"}), 400
-        updated[field] = value
+            return jsonify({"error": f"{field} must be 0 or more, with at most one decimal place"}), 400
 
     conn.execute(
         """UPDATE settings SET first_hour_rate=?, extra_hour_rate=?, daily_hourly_cap=?,
@@ -460,8 +473,8 @@ def _resolve_order_items(conn, ordered_items):
         menu_row = conn.execute("SELECT * FROM menu_items WHERE id=?", (item_id,)).fetchone()
         if not menu_row:
             continue
-        line_total = menu_row["price"] * qty
-        items_cost += line_total
+        line_total = round_money(menu_row["price"] * qty)
+        items_cost = round_money(items_cost + line_total)
         receipt_items.append({
             "id": menu_row["id"],
             "name": menu_row["name"],
@@ -470,6 +483,25 @@ def _resolve_order_items(conn, ordered_items):
             "line_total": line_total,
         })
     return items_cost, receipt_items
+
+
+def parse_discount_percent(raw):
+    """Optional checkout discount, as a percent of the whole bill. Blank/missing
+    means no discount. Raises ValueError for anything outside 0-100."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return 0.0
+    pct = float(raw)
+    if not math.isfinite(pct) or pct < 0 or pct > 100:
+        raise ValueError
+    return pct
+
+
+def discount_amount_for(subtotal, pct):
+    """To the nearest 0.1 LE, rounded half up — worked out in tenths of a pound.
+    Mirrored operation-for-operation in static/js/app.js (discountAmountFor) so the
+    cart preview always matches the receipt: change both together."""
+    subtotal_tenths = round(subtotal * 10)
+    return round_money(math.floor(subtotal_tenths * pct / 100 + 0.5) / 10)
 
 
 @app.route("/api/customers/<int:customer_id>/order", methods=["POST"])
@@ -505,6 +537,10 @@ def checkout_customer(customer_id):
     body = request.get_json(force=True) or {}
     ordered_items = body.get("items", [])  # [{id, qty}]
     payment_method = (body.get("payment_method") or "").strip() or None
+    try:
+        discount_percent = parse_discount_percent(body.get("discount_percent"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Discount must be a percentage between 0 and 100"}), 400
 
     conn = get_db()
     row = _get_customer_or_404(conn, customer_id)
@@ -525,14 +561,17 @@ def checkout_customer(customer_id):
 
     items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
 
-    total_cost = time_cost + items_cost
+    subtotal = round_money(time_cost + items_cost)
+    discount_amount = discount_amount_for(subtotal, discount_percent)
+    total_cost = round_money(subtotal - discount_amount)
     check_out = now_str()
 
     conn.execute(
-        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method, is_premium)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json,
+                               payment_method, is_premium, discount_percent, discount_amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (customer_id, data["check_in_time"], check_out, time_cost, items_cost, total_cost,
-         json.dumps(receipt_items), payment_method, int(is_premium)),
+         json.dumps(receipt_items), payment_method, int(is_premium), discount_percent, discount_amount),
     )
     conn.execute(
         "UPDATE customers SET check_in_time=NULL, current_order_json='[]', is_premium=0 WHERE id=?",
@@ -555,7 +594,11 @@ def checkout_customer(customer_id):
         "time_cost": time_cost,
         "items": receipt_items,
         "items_cost": items_cost,
+        "subtotal": subtotal,
+        "discount_percent": discount_percent,
+        "discount_amount": discount_amount,
         "total_cost": total_cost,
+        "payment_method": payment_method,
     }
     conn.close()
 
@@ -574,6 +617,10 @@ def takeaway_order():
     body = request.get_json(force=True) or {}
     ordered_items = body.get("items", [])  # [{id, qty}]
     payment_method = (body.get("payment_method") or "").strip() or None
+    try:
+        discount_percent = parse_discount_percent(body.get("discount_percent"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Discount must be a percentage between 0 and 100"}), 400
 
     conn = get_db()
     items_cost, receipt_items = _resolve_order_items(conn, ordered_items)
@@ -581,11 +628,15 @@ def takeaway_order():
         conn.close()
         return jsonify({"error": "Add at least one item to the order"}), 400
 
+    discount_amount = discount_amount_for(items_cost, discount_percent)
+    total_cost = round_money(items_cost - discount_amount)
     sold_at = now_str()
     conn.execute(
-        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json, payment_method, is_premium)
-           VALUES (NULL, ?, ?, 0, ?, ?, ?, ?, 0)""",
-        (sold_at, sold_at, items_cost, items_cost, json.dumps(receipt_items), payment_method),
+        """INSERT INTO visits (customer_id, check_in, check_out, time_cost, items_cost, total_cost, items_json,
+                               payment_method, is_premium, discount_percent, discount_amount)
+           VALUES (NULL, ?, ?, 0, ?, ?, ?, ?, 0, ?, ?)""",
+        (sold_at, sold_at, items_cost, total_cost, json.dumps(receipt_items), payment_method,
+         discount_percent, discount_amount),
     )
     conn.commit()
     conn.close()
@@ -600,7 +651,11 @@ def takeaway_order():
         "time_cost": 0,
         "items": receipt_items,
         "items_cost": items_cost,
-        "total_cost": items_cost,
+        "subtotal": items_cost,
+        "discount_percent": discount_percent,
+        "discount_amount": discount_amount,
+        "total_cost": total_cost,
+        "payment_method": payment_method,
     }
 
     printed, print_message = receipt_printer.print_receipt(receipt)
@@ -651,8 +706,24 @@ def customer_visits(customer_id):
             "items": items,
             "payment_method": r["payment_method"],
             "is_premium": bool(r["is_premium"]),
+            "discount_percent": r["discount_percent"],
+            "discount_amount": r["discount_amount"],
         })
     return jsonify(result)
+
+
+@app.route("/api/visits/<int:visit_id>", methods=["DELETE"])
+@require_admin
+def admin_delete_visit(visit_id):
+    """Admin-only: delete a receipt (a checkout or takeaway row in `visits`), e.g. one
+    rung up by mistake. It drops out of revenue reports and session history."""
+    conn = get_db()
+    cur = conn.execute("DELETE FROM visits WHERE id=?", (visit_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        return jsonify({"error": "Receipt not found"}), 404
+    return jsonify({"deleted": True})
 
 
 # ---------- Reports ----------
@@ -664,17 +735,16 @@ REPORT_PERIOD_DAYS = {"last_week": 7, "last_month": 30, "last_3_months": 90}
 @require_admin
 def get_reports():
     """Revenue reporting over a time window: totals, per-product revenue, top
-    customers. `period` is one of REPORT_PERIOD_DAYS' keys (a rolling window ending
-    now), 'today' (the current business day, i.e. since the last
-    BUSINESS_DAY_RESET_HOUR:MINUTE), or 'custom' with `start`/`end` query params
-    (YYYY-MM-DD, end inclusive)."""
+    customers. Days are calendar days (12am to 12am), since the shop runs 24/7.
+    `period` is 'today' (since 12am),
+    one of REPORT_PERIOD_DAYS' keys (from 12am that many days ago up to now), or
+    'custom' with `start`/`end` query params (YYYY-MM-DD, end inclusive)."""
     period = request.args.get("period", "last_week")
     now = datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if period == "today":
-        # Business day, not calendar day: the shop closes at 2am, so a session
-        # checked out at 1am still belongs to the day it started on.
-        start = full_day_end(now) - timedelta(days=1)
+        start = midnight
         end = now
     elif period == "custom":
         start_str = request.args.get("start")
@@ -687,7 +757,7 @@ def get_reports():
         except ValueError:
             return jsonify({"error": "start and end must be YYYY-MM-DD"}), 400
     elif period in REPORT_PERIOD_DAYS:
-        start = now - timedelta(days=REPORT_PERIOD_DAYS[period])
+        start = midnight - timedelta(days=REPORT_PERIOD_DAYS[period])
         end = now
     else:
         return jsonify({"error": "Invalid period"}), 400
@@ -711,20 +781,41 @@ def get_reports():
     premium_revenue = 0
     takeaway_revenue = 0
     takeaway_count = 0
+    discount_total = 0
     products = {}       # item id -> {id, name, qty, revenue}
     customer_totals = {}  # customer id -> {visit_count, total_spent}
+    payment_methods = {}  # method (or "unknown") -> {method, count, revenue}
+    receipts = []
 
     for r in rows:
         total_revenue += r["total_cost"]
         time_revenue += r["time_cost"]
         items_revenue += r["items_cost"]
+        discount_total += r["discount_amount"]
         if r["is_premium"]:
             premium_revenue += r["time_cost"]
+
+        method = r["payment_method"] or "unknown"
+        pm = payment_methods.setdefault(method, {"method": method, "count": 0, "revenue": 0})
+        pm["count"] += 1
+        pm["revenue"] += r["total_cost"]
 
         try:
             items = json.loads(r["items_json"])
         except (TypeError, ValueError):
             items = []
+        receipts.append({
+            "id": r["id"],
+            "customer_id": r["customer_id"],
+            "check_in": r["check_in"],
+            "check_out": r["check_out"],
+            "time_cost": r["time_cost"],
+            "items": items,
+            "discount_percent": r["discount_percent"],
+            "discount_amount": r["discount_amount"],
+            "total_cost": r["total_cost"],
+            "payment_method": r["payment_method"],
+        })
         for it in items:
             entry = products.setdefault(it.get("id"), {
                 "id": it.get("id"), "name": it.get("name"), "qty": 0, "revenue": 0,
@@ -768,22 +859,38 @@ def get_reports():
             "phone": info["phone"] if info else "",
             "visit_count": totals["visit_count"],
             "seconds_on_site": totals["seconds_on_site"],
-            "total_spent": totals["total_spent"],
+            "total_spent": round_money(totals["total_spent"]),
         })
     top_customers.sort(key=lambda c: c["total_spent"], reverse=True)
+    for group in (payment_methods.values(), products.values()):
+        for entry in group:
+            entry["revenue"] = round_money(entry["revenue"])
+
+    for rec in receipts:
+        info = customer_info.get(rec["customer_id"])
+        if rec["customer_id"] is None:
+            rec["customer_name"] = None  # takeaway
+        elif info:
+            rec["customer_name"] = f"{info['first_name']} {info['last_name']}"
+        else:
+            rec["customer_name"] = "Deleted customer"
+    receipts.reverse()  # newest first
 
     return jsonify({
         "start": start.strftime(DT_FMT),
         "end": min(end, now).strftime(DT_FMT),
         "visit_count": len(rows) - takeaway_count,
         "takeaway_count": takeaway_count,
-        "total_revenue": total_revenue,
-        "time_revenue": time_revenue,
-        "items_revenue": items_revenue,
-        "premium_revenue": premium_revenue,
-        "takeaway_revenue": takeaway_revenue,
+        "total_revenue": round_money(total_revenue),
+        "time_revenue": round_money(time_revenue),
+        "items_revenue": round_money(items_revenue),
+        "premium_revenue": round_money(premium_revenue),
+        "takeaway_revenue": round_money(takeaway_revenue),
+        "discount_total": round_money(discount_total),
+        "payment_methods": sorted(payment_methods.values(), key=lambda p: p["revenue"], reverse=True),
         "products": sorted(products.values(), key=lambda p: p["revenue"], reverse=True),
         "top_customers": top_customers[:10],
+        "receipts": receipts,
     })
 
 
@@ -801,14 +908,56 @@ def get_menu():
             "id": r["id"], "name": r["name"], "name_ar": r["name_ar"], "price": r["price"],
         })
 
+    # Categories an admin created that aren't in menu_data.py go last, in name order.
+    extra = sorted(cat for cat in grouped if cat not in CATEGORY_IMAGES)
     categories = []
-    for cat in CATEGORY_ORDER:
+    for cat in CATEGORY_ORDER + extra:
         categories.append({
             "name": cat,
-            "image": f"/static/images/{CATEGORY_IMAGES.get(cat, '')}",
+            "image": f"/static/images/{CATEGORY_IMAGES[cat]}" if cat in CATEGORY_IMAGES else None,
             "items": grouped.get(cat, []),
         })
     return jsonify(categories)
+
+
+@app.route("/api/menu", methods=["POST"])
+@require_admin
+def admin_add_menu_item():
+    """Admin-only: add a new menu item, to an existing category or a new one."""
+    body = request.get_json(force=True) or {}
+    category = (body.get("category") or "").strip()
+    name = (body.get("name") or "").strip()
+    name_ar = (body.get("name_ar") or "").strip() or None
+    if not category or not name:
+        return jsonify({"error": "category and name are required"}), 400
+    try:
+        price = parse_money(body.get("price"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "price must be 0 or more, with at most one decimal place"}), 400
+
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO menu_items (category, name, name_ar, price) VALUES (?, ?, ?, ?)",
+        (category, name, name_ar, price),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"id": cur.lastrowid, "category": category, "name": name,
+                    "name_ar": name_ar, "price": price}), 201
+
+
+@app.route("/api/menu/<int:item_id>", methods=["DELETE"])
+@require_admin
+def admin_delete_menu_item(item_id):
+    """Admin-only: remove a menu item. Past receipts keep its name/price, since
+    visits.items_json stores a copy rather than a reference."""
+    conn = get_db()
+    cur = conn.execute("DELETE FROM menu_items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        return jsonify({"error": "Menu item not found"}), 404
+    return jsonify({"deleted": True})
 
 
 @app.route("/api/menu/<int:item_id>", methods=["PUT"])
@@ -823,13 +972,10 @@ def admin_update_menu_item(item_id):
         return jsonify({"error": "Menu item not found"}), 404
 
     try:
-        price = int(body.get("price", row["price"]))
+        price = parse_money(body.get("price", row["price"]))
     except (TypeError, ValueError):
         conn.close()
-        return jsonify({"error": "price must be a number"}), 400
-    if price < 0:
-        conn.close()
-        return jsonify({"error": "price must not be negative"}), 400
+        return jsonify({"error": "price must be 0 or more, with at most one decimal place"}), 400
 
     name = (body.get("name") or row["name"]).strip()
     name_ar = body.get("name_ar", row["name_ar"])

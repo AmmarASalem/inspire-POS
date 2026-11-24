@@ -22,7 +22,9 @@ if not exist "%PYTHONW%" (
 call :is_up
 if "%UP%"=="0" (
     pushd "%APPDIR%"
-    start "Inspire POS server" /min "%PYTHONW%" -c "import database; database.init_db(); from app import app; app.run(host='127.0.0.1', port=5000)"
+    rem run_server.py logs any startup failure to deploy\windows\server.log,
+    rem since pythonw.exe has no console to print a traceback to.
+    start "Inspire POS server" /min "%PYTHONW%" "%APPDIR%\deploy\windows\run_server.py"
     popd
 )
 
@@ -33,6 +35,7 @@ if "%UP%"=="1" goto :launchbrowser
 set /a tries+=1
 if %tries% GEQ 40 (
     echo The server did not respond within 20 seconds.
+    echo See %APPDIR%\deploy\windows\server.log for the reason.
     pause
     exit /b 1
 )
