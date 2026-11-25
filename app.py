@@ -36,7 +36,7 @@ BUSINESS_DAY_RESET_MINUTE = 0
 HOUR_GRACE_MINUTES = 15
 
 # One-time-setup placeholder — change this before the till goes live.
-ADMIN_PIN = os.environ.get("INSPIRE_ADMIN_PIN", "1234")
+ADMIN_PIN = os.environ.get("INSPIRE_ADMIN_PIN", "Inspireos57")
 
 
 def require_admin(fn):
